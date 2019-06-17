@@ -1,0 +1,1279 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <assert.h>
+#include <unistd.h>
+#include <errno.h>
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+#include <GLES2/gl2.h>
+#include <GLES2/gl2ext.h>
+#include <clover_utils.h>
+#include <clover_log.h>
+#include <clover_array.h>
+#include <clover_region.h>
+#include <clover_shm.h>
+#include <clover_signal.h>
+#include <compositor.h>
+
+static const char vertex_shader[] =
+	"uniform mat4 proj;\n"
+	"attribute vec2 position;\n"
+	"attribute vec2 texcoord;\n"
+	"varying vec2 v_texcoord;\n"
+	"void main()\n"
+	"{\n"
+	"   gl_Position = proj * vec4(position, 0.0, 1.0);\n"
+	"   v_texcoord = texcoord;\n"
+	"}\n";
+
+static const char texture_fragment_shader_rgba[] =
+	"precision mediump float;\n"
+	"varying vec2 v_texcoord;\n"
+	"uniform sampler2D tex;\n"
+	"uniform float alpha;\n"
+	"void main()\n"
+	"{\n"
+	"   gl_FragColor = alpha * texture2D(tex, v_texcoord)\n;"
+	;
+
+static const char texture_fragment_shader_rgbx[] =
+	"precision mediump float;\n"
+	"varying vec2 v_texcoord;\n"
+	"uniform sampler2D tex;\n"
+	"uniform float alpha;\n"
+	"void main()\n"
+	"{\n"
+	"   gl_FragColor.rgb = alpha * texture2D(tex, v_texcoord).rgb\n;"
+	"   gl_FragColor.a = alpha;\n"
+	;
+
+static const char fragment_brace[] =
+	"}\n";
+
+static const EGLint gl_opaque_attribs[] = {
+	EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
+	EGL_RED_SIZE, 8,
+	EGL_GREEN_SIZE, 8,
+	EGL_BLUE_SIZE, 8,
+	EGL_ALPHA_SIZE, 0,
+	EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
+	EGL_NONE,
+};
+
+struct gl_shm_buffer {
+	struct clv_buffer base;
+	struct clv_shm shm;
+};
+
+struct gl_output_state {
+	EGLSurface egl_surface;
+};
+
+struct gl_shader {
+	GLuint program;
+	GLuint vertex_shader, fragment_shader;
+	GLint proj_uniform;
+	GLint tex_uniforms[3];
+	GLint alpha_uniform;
+	GLint color_uniform;
+	const char *vertex_source, *fragment_source;
+};
+
+struct gl_display {
+	struct clv_renderer base;
+	EGLDisplay egl_display;
+	EGLContext egl_context;
+	EGLConfig egl_config;
+	EGLSurface dummy_surface;
+	u32 gl_version;
+
+	struct clv_array vertices;
+	struct clv_array vtxcnt;
+
+	PFNEGLCREATEPLATFORMWINDOWSURFACEEXTPROC create_platform_window;
+
+	s32 support_unpack_subimage;
+	s32 support_context_priority;
+	s32 support_surfaceless_context;
+	s32 support_texture_rg;
+
+	struct gl_shader texture_shader_rgba;
+	struct gl_shader texture_shader_rgbx;
+	struct gl_shader *current_shader;
+
+	struct clv_signal destroy_signal;
+};
+
+struct gl_surface_state {
+	GLfloat color[4];
+	struct gl_shader *shader;
+
+	GLuint textures[3];
+	s32 count_textures;
+	s32 needs_full_upload;
+	struct clv_region texture_damage;
+
+	GLenum gl_format[3];
+	GLenum gl_pixel_type;
+
+	GLenum target;
+	s32 count_images;
+
+	s32 pitch;
+	s32 h;
+	s32 y_inverted;
+
+	s32 offset[3];
+	s32 hsub[3];
+	s32 vsub[3];
+
+	struct clv_surface *surface;
+
+	struct clv_buffer *buffer;
+
+	struct clv_listener display_destroy_listener;
+	struct clv_listener surface_destroy_listener;
+};
+
+static PFNEGLGETPLATFORMDISPLAYEXTPROC get_platform_display = NULL;
+
+static const char *egl_strerror(EGLint err)
+{
+#define EGLERROR(x) case x: return #x;
+	switch (err) {
+	EGLERROR(EGL_SUCCESS)
+	EGLERROR(EGL_NOT_INITIALIZED)
+	EGLERROR(EGL_BAD_ACCESS)
+	EGLERROR(EGL_BAD_ALLOC)
+	EGLERROR(EGL_BAD_ATTRIBUTE)
+	EGLERROR(EGL_BAD_CONTEXT)
+	EGLERROR(EGL_BAD_CONFIG)
+	EGLERROR(EGL_BAD_CURRENT_SURFACE)
+	EGLERROR(EGL_BAD_DISPLAY)
+	EGLERROR(EGL_BAD_SURFACE)
+	EGLERROR(EGL_BAD_MATCH)
+	EGLERROR(EGL_BAD_PARAMETER)
+	EGLERROR(EGL_BAD_NATIVE_PIXMAP)
+	EGLERROR(EGL_BAD_NATIVE_WINDOW)
+	EGLERROR(EGL_CONTEXT_LOST)
+	default:
+		return "unknown";
+	}
+#undef EGLERROR
+}
+
+static void egl_error_state(void)
+{
+	EGLint err;
+
+	err = eglGetError();
+	clv_err("EGL err: %s (0x%04lX)", egl_strerror(err), (u64)err);
+}
+
+static inline struct gl_display *get_display(struct clv_compositor *c)
+{
+	return container_of(c->renderer, struct gl_display, base);
+}
+
+static s32 match_config_to_visual(EGLDisplay egl_display, EGLint visual_id,
+				  EGLConfig *configs, s32 count)
+{
+	s32 i;
+	EGLint id;
+
+	for (i = 0; i < count; i++) {
+		if (!eglGetConfigAttrib(egl_display, configs[i],
+					EGL_NATIVE_VISUAL_ID, &id))
+			continue;
+		if (id == visual_id)
+			return i;
+	}
+
+	return -1;
+}
+
+static s32 egl_choose_config(struct gl_display *disp, const EGLint *attribs,
+			     const EGLint *visual_ids, const s32 count_ids,
+			     EGLConfig *config_matched)
+{
+	EGLint count_configs = 0;
+	EGLint count_matched = 0;
+	EGLConfig *configs;
+	s32 i, config_index = -1;
+
+	if (!eglGetConfigs(disp->egl_display, NULL, 0, &count_configs)) {
+		clv_err("Cannot get EGL configs.");
+		return -1;
+	}
+
+	configs = calloc(count_configs, sizeof(*configs));
+	if (!configs)
+		return -ENOMEM;
+
+	if (!eglChooseConfig(disp->egl_display, attribs, configs,
+			     count_configs, &count_matched)
+	    || !count_matched) {
+		clv_err("cannot select appropriate configs.");
+		goto out1;
+	}
+
+	if (!visual_ids || count_ids == 0)
+		config_index = 0;
+
+	for (i = 0; config_index == -1 && i < count_ids; i++) {
+		config_index = match_config_to_visual(disp->egl_display,
+						      visual_ids[i],
+						      configs,
+						      count_matched);
+	}
+
+	if (config_index != -1)
+		*config_matched = configs[config_index];
+
+out1:
+	free(configs);
+	if (config_index == -1)
+		return -1;
+
+	if (i > 1)
+		clv_warn("Unable to use first choice EGL config with ID "
+			 "0x%x, succeeded with alternate ID 0x%x",
+			 visual_ids[0], visual_ids[i - 1]);
+
+	return 0;
+}
+
+static s32 check_egl_extension(const char *extensions, const char *extension)
+{
+	u32 extlen = strlen(extension);
+	const char *end = extensions + strlen(extensions);
+
+	while (extensions < end) {
+		size_t n = 0;
+
+		if (*extensions == ' ') {
+			extensions++;
+			continue;
+		}
+
+		n = strcspn(extensions, " ");
+
+		if (n == extlen && strncmp(extension, extensions, n) == 0)
+			return 1;
+
+		extensions += n;
+	}
+
+	return 0;
+}
+
+static void set_egl_client_extensions(struct gl_display *disp)
+{
+	const char *extensions;
+	
+	extensions = (const char *)eglQueryString(EGL_NO_DISPLAY,
+						  EGL_EXTENSIONS);
+	if (!extensions) {
+		clv_info("cannot query client EGL_EXTENSIONS");
+		return;
+	}
+
+	if (check_egl_extension(extensions, "EGL_EXT_platform_base")) {
+		disp->create_platform_window = (void *)eglGetProcAddress(
+				"eglCreatePlatformWindowSurfaceEXT");
+		if (!disp->create_platform_window)
+			clv_warn("failed to call "
+				 "eglCreatePlatformWindowSurfaceEXT");
+	} else {
+		clv_warn("EGL_EXT_platform_base not supported.");
+	}
+}
+
+static s32 set_egl_extensions(struct gl_display *disp)
+{
+	const char *extensions;
+
+	extensions = (const char *)eglQueryString(disp->egl_display,
+						  EGL_EXTENSIONS);
+	if (!extensions) {
+		clv_err("cannot query EGL_EXTENSIONS");
+		return -1;
+	}
+
+	if (check_egl_extension(extensions, "EGL_IMG_context_priority"))
+		disp->support_context_priority = 1;
+
+	if (check_egl_extension(extensions, "EGL_KHR_surfaceless_context"))
+		disp->support_surfaceless_context = 1;
+
+	set_egl_client_extensions(disp);
+	clv_info("EGL_IMG_context_priority: %s",
+		 disp->support_context_priority ? "Y" : "N");
+	clv_info("EGL_KHR_surfaceless_context: %s",
+		 disp->support_surfaceless_context ? "Y" : "N");
+	return 0;
+}
+
+static void egl_info(EGLDisplay disp)
+{
+	const char *str;
+
+	str = eglQueryString(disp, EGL_VERSION);
+	clv_info("EGL version: %s", str ? str : "(null)");
+
+	str = eglQueryString(disp, EGL_VENDOR);
+	clv_info("EGL vendor: %s", str ? str : "(null)");
+
+	str = eglQueryString(disp, EGL_CLIENT_APIS);
+	clv_info("EGL client APIs: %s", str ? str : "(null)");
+
+	str = eglQueryString(disp, EGL_EXTENSIONS);
+	clv_info("EGL extensions: %s", str ? str : "(null)");
+}
+
+static void gl_info(void)
+{
+	const char *str;
+
+	str = (char *)glGetString(GL_VERSION);
+	clv_info("GL version: %s", str ? str : "(null)");
+
+	str = (char *)glGetString(GL_SHADING_LANGUAGE_VERSION);
+	clv_info("GLSL version: %s", str ? str : "(null)");
+
+	str = (char *)glGetString(GL_VENDOR);
+	clv_info("GL vendor: %s", str ? str : "(null)");
+
+	str = (char *)glGetString(GL_RENDERER);
+	clv_info("GL renderer: %s", str ? str : "(null)");
+
+	str = (char *)glGetString(GL_EXTENSIONS);
+	clv_info("GL extensions: %s", str ? str : "(null)");
+}
+
+static s32 create_pbuffer_surface(struct gl_display *disp)
+{
+	EGLConfig pbuffer_config;
+
+	static const EGLint pbuffer_config_attribs[] = {
+		EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
+		EGL_RED_SIZE, 8,
+		EGL_GREEN_SIZE, 8,
+		EGL_BLUE_SIZE, 8,
+		EGL_ALPHA_SIZE, 0,
+		EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
+		EGL_NONE,
+	};
+
+	static const EGLint pbuffer_attribs[] = {
+		EGL_WIDTH, 10,
+		EGL_HEIGHT, 10,
+		EGL_NONE,
+	};
+
+	if (egl_choose_config(disp, pbuffer_config_attribs, NULL, 0,
+			      &pbuffer_config) < 0) {
+		clv_err("failed to choose EGL config for PbufferSurface");
+		return -1;
+	}
+
+	disp->dummy_surface = eglCreatePbufferSurface(disp->egl_display,
+						      pbuffer_config,
+						      pbuffer_attribs);
+
+	if (disp->dummy_surface == EGL_NO_SURFACE) {
+		clv_err("failed to create PbufferSurface");
+		return -1;
+	}
+
+	return 0;
+}
+
+#define GEN_GL_VERSION(major, minor) (((u32)(major) << 16) | (u32)(minor))
+#define GEN_GL_VERSION_INVALID GEN_GL_VERSION(0, 0)
+
+static u32 get_gl_version(void)
+{
+	const char *version;
+	s32 major, minor;
+
+	version = (const char *)glGetString(GL_VERSION);
+	if (version && (sscanf(version, "%d.%d", &major, &minor) == 2
+	     || sscanf(version, "OpenGL ES %d.%d", &major, &minor) == 2)) {
+		return GEN_GL_VERSION(major, minor);
+	}
+
+	return GEN_GL_VERSION_INVALID;
+}
+
+static void set_shaders(struct clv_compositor *c)
+{
+	struct gl_display *disp = get_display(c);
+
+	disp->texture_shader_rgba.vertex_source = vertex_shader;
+	disp->texture_shader_rgba.fragment_source =texture_fragment_shader_rgba;
+
+	disp->texture_shader_rgbx.vertex_source = vertex_shader;
+	disp->texture_shader_rgbx.fragment_source =texture_fragment_shader_rgbx;
+}
+
+static s32 gl_setup(struct clv_compositor *c, EGLSurface egl_surface)
+{
+	struct gl_display *disp = get_display(c);
+	const char *extensions;
+	EGLConfig context_config;
+	EGLBoolean ret;
+	EGLint context_attribs[16] = {
+		EGL_CONTEXT_CLIENT_VERSION, 0,
+	};
+	u32 count_attrs = 2;
+	EGLint value = EGL_CONTEXT_PRIORITY_MEDIUM_IMG;
+
+	if (!eglBindAPI(EGL_OPENGL_ES_API)) {
+		clv_err("failed to bind EGL_OPENGL_ES_API");
+		egl_error_state();
+		return -1;
+	}
+
+	if (disp->support_context_priority) {
+		context_attribs[count_attrs++] = EGL_CONTEXT_PRIORITY_LEVEL_IMG;
+		context_attribs[count_attrs++] = EGL_CONTEXT_PRIORITY_HIGH_IMG;
+	}
+
+	assert(count_attrs < ARRAY_SIZE(context_attribs));
+	context_attribs[count_attrs] = EGL_NONE;
+
+	context_config = disp->egl_config;
+
+	context_attribs[1] = 3;
+	disp->egl_context = eglCreateContext(disp->egl_display, context_config,
+					     EGL_NO_CONTEXT, context_attribs);
+	if (disp->egl_context == NULL) {
+		context_attribs[1] = 2;
+		disp->egl_context = eglCreateContext(disp->egl_display,
+						     context_config,
+						     EGL_NO_CONTEXT,
+						     context_attribs);
+		if (disp->egl_context == EGL_NO_CONTEXT) {
+			clv_err("failed to create context");
+			egl_error_state();
+			return -1;
+		}
+		clv_info("Create OpenGLES2 context");
+	} else {
+		clv_info("Create OpenGLES3 context");
+	}
+
+	if (disp->support_context_priority) {
+		eglQueryContext(disp->egl_display, disp->egl_context,
+				EGL_CONTEXT_PRIORITY_LEVEL_IMG, &value);
+
+		if (value != EGL_CONTEXT_PRIORITY_HIGH_IMG) {
+			clv_err("Failed to obtain a high priority context.");
+		}
+	}
+
+	ret = eglMakeCurrent(disp->egl_display, egl_surface,
+			     egl_surface, disp->egl_context);
+	if (ret == EGL_FALSE) {
+		clv_err("Failed to make EGL context current.");
+		egl_error_state();
+		return -1;
+	}
+
+	disp->gl_version = get_gl_version();
+	if (disp->gl_version == GEN_GL_VERSION_INVALID) {
+		clv_warn("failed to detect GLES version, "
+			 "defaulting to 2.0.");
+		disp->gl_version = GEN_GL_VERSION(2, 0);
+	}
+
+	gl_info();
+
+	extensions = (const char *)glGetString(GL_EXTENSIONS);
+	if (!extensions) {
+		clv_err("Cannot get GL extension string");
+		return -1;
+	}
+	if (!check_egl_extension(extensions, "GL_EXT_texture_format_BGRA8888")){
+		clv_err("GL_EXT_texture_format_BGRA8888 not available");
+		return -1;
+	}
+
+	if (disp->gl_version >= GEN_GL_VERSION(3, 0)
+	     || check_egl_extension(extensions, "GL_EXT_unpack_subimage"))
+		disp->support_unpack_subimage = 1;
+	
+	if (disp->gl_version >= GEN_GL_VERSION(3, 0)
+	     || check_egl_extension(extensions, "GL_EXT_texture_rg"))
+		disp->support_texture_rg = 1;
+
+	glActiveTexture(GL_TEXTURE0);
+
+	set_shaders(c);
+
+	clv_info("GL_EXT_texture_rg: %s",
+		 disp->support_texture_rg ? "Y" : "N");
+	clv_info("GL_EXT_unpack_subimage: %s",
+		 disp->support_unpack_subimage ? "Y" : "N");
+	return 0;
+}
+
+static void gl_surface_state_destroy(struct gl_surface_state *gs)
+{
+	if (gs) {
+		if (gs->surface)
+			gs->surface->renderer_state = NULL;
+		glDeleteTextures(gs->count_textures, gs->textures);
+		clv_region_fini(&gs->texture_damage);
+		free(gs);
+	}
+}
+
+static void surface_state_handle_surface_destroy(struct clv_listener *listener,
+						 void *data)
+{
+	struct gl_surface_state *gs = container_of(listener,
+						   struct gl_surface_state,
+						   surface_destroy_listener);
+	gl_surface_state_destroy(gs);
+}
+
+static void surface_state_handle_display_destroy(struct clv_listener *listener,
+						 void *data)
+{
+	struct gl_surface_state *gs = container_of(listener,
+						   struct gl_surface_state,
+						   display_destroy_listener);
+	gl_surface_state_destroy(gs);
+}
+
+static s32 gl_surface_state_create(struct clv_surface *surface)
+{
+	struct clv_compositor *c = surface->c;
+	struct gl_display *disp = get_display(c);
+	struct gl_surface_state *gs;
+
+	gs = calloc(1, sizeof(*gs));
+	if (!gs)
+		return -ENOMEM;
+
+	gs->pitch = 1;
+	gs->y_inverted = 1;
+	gs->surface = surface;
+	clv_region_init(&gs->texture_damage);
+
+	gs->surface_destroy_listener.notify =
+		surface_state_handle_surface_destroy;
+	clv_signal_add(&surface->destroy_signal, &gs->surface_destroy_listener);
+
+	gs->display_destroy_listener.notify =
+		surface_state_handle_display_destroy;
+	clv_signal_add(&disp->destroy_signal, &gs->display_destroy_listener);
+
+	surface->renderer_state = gs;
+	return 0;
+}
+
+static struct gl_surface_state *get_surface_state(struct clv_surface *surface)
+{
+	if (!surface->renderer_state)
+		gl_surface_state_create(surface);
+
+	return (struct gl_surface_state *)surface->renderer_state;
+}
+
+static void alloc_textures(struct gl_surface_state *gs, s32 count_textures)
+{
+	s32 i;
+
+	if (count_textures <= gs->count_textures)
+		return;
+
+	for (i = gs->count_textures; i < count_textures; i++) {
+		glGenTextures(1, &gs->textures[i]);
+		glBindTexture(gs->target, gs->textures[i]);
+		glTexParameteri(gs->target,
+				GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(gs->target,
+				GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	}
+	gs->count_textures = count_textures;
+	glBindTexture(gs->target, 0);
+}
+static void gl_attach_shm_buffer(struct clv_surface *surface,
+				 struct clv_buffer *buffer)
+{
+	struct clv_compositor *c = surface->c;
+	struct gl_display *disp = get_display(c);
+	struct gl_surface_state *gs = get_surface_state(surface);
+	struct gl_shm_buffer *shm_buffer;
+	GLenum gl_format[3] = {0, 0, 0};
+	GLenum gl_pixel_type;
+	s32 pitch;
+	s32 count_planes;
+
+	shm_buffer = container_of(buffer, struct gl_shm_buffer, base);
+	if (clv_shm_init(&shm_buffer->shm, buffer->name, buffer->size, 0) < 0) {
+		clv_err("cannot open share memory buffer");
+		return;
+	}
+	count_planes = 1;
+	gs->offset[0] = 0;
+	gs->hsub[0] = 1;
+	gs->vsub[0] = 1;
+
+	switch (buffer->pixel_fmt) {
+	case CLV_PIXEL_FMT_XRGB8888:
+		gs->shader = &disp->texture_shader_rgbx;
+		pitch = buffer->stride / 4;
+		gl_format[0] = GL_BGRA_EXT;
+		gl_pixel_type = GL_UNSIGNED_BYTE;
+		surface->is_opaque = 1;
+		break;
+	case CLV_PIXEL_FMT_ARGB8888:
+		gs->shader = &disp->texture_shader_rgba;
+		pitch = buffer->stride / 4;
+		gl_format[0] = GL_BGRA_EXT;
+		gl_pixel_type = GL_UNSIGNED_BYTE;
+		surface->is_opaque = 0;
+		break;
+	default:
+		clv_err("unknown pixel format %u", buffer->pixel_fmt);
+		return;
+	}
+
+	if (pitch != gs->pitch
+	    || buffer->h != gs->h
+	    || gl_format[0] != gs->gl_format[0]
+	    || gl_format[1] != gs->gl_format[1]
+	    || gl_format[2] != gs->gl_format[2]
+	    || gl_pixel_type != gs->gl_pixel_type) {
+		gs->pitch = pitch;
+		gs->h = buffer->h;
+		gs->gl_format[0] = gl_format[0];
+		gs->gl_format[1] = gl_format[1];
+		gs->gl_format[2] = gl_format[2];
+		gs->gl_pixel_type = gl_pixel_type;
+		gs->needs_full_upload = 1;
+		gs->y_inverted = 1;
+		gs->surface = surface;
+		alloc_textures(gs, count_planes);
+	}
+}
+
+static void gl_attach_buffer(struct clv_surface *surface,
+			     struct clv_buffer *buffer)
+{
+	struct gl_surface_state *gs = get_surface_state(surface);
+
+	if (!buffer) {
+		glDeleteTextures(gs->count_textures, gs->textures);
+		gs->count_textures = 0;
+		gs->y_inverted = 1;
+		gs->buffer = NULL;
+		surface->is_opaque = 0;
+		return;
+	}
+
+	if (buffer->type == CLV_BUF_TYPE_SHM) {
+		gl_attach_shm_buffer(surface, buffer);
+		gs->buffer = buffer;
+	} else {
+		clv_err("unknown buffer type %u", buffer->type);
+		gs->count_textures = 0;
+		gs->y_inverted = 1;
+		surface->is_opaque = 0;
+	}
+}
+
+static s32 gl_switch_output(struct clv_output *output)
+{
+	struct gl_output_state *go = output->renderer_state;
+	struct gl_display *disp = get_display(output->c);
+	static s32 errored = 0;
+
+	if (eglMakeCurrent(disp->egl_display, go->egl_surface, go->egl_surface,
+			   disp->egl_context) == EGL_FALSE) {
+		if (errored)
+			return -1;
+		errored = 1;
+		clv_err("failed to switch EGL context.");
+		egl_error_state();
+		return -1;
+	}
+
+	return 0;
+}
+
+static s32 compile_shader(GLenum type, s32 count, const char **sources)
+{
+	GLuint s;
+	char msg[512];
+	GLint status;
+
+	s = glCreateShader(type);
+	glShaderSource(s, count, sources, NULL);
+	glCompileShader(s);
+	glGetShaderiv(s, GL_COMPILE_STATUS, &status);
+	if (!status) {
+		glGetShaderInfoLog(s, sizeof msg, NULL, msg);
+		clv_err("shader info: %s\n", msg);
+		return GL_NONE;
+	}
+
+	return s;
+}
+
+static s32 load_shader(struct gl_shader *shader, struct gl_display *disp,
+		       const char *vertex_source, const char *fragment_source)
+{
+	char msg[512];
+	GLint status;
+	const char *sources[2];
+
+	shader->vertex_shader =
+		compile_shader(GL_VERTEX_SHADER, 1, &vertex_source);
+
+	sources[0] = fragment_source;
+	sources[1] = fragment_brace;
+
+	shader->fragment_shader = compile_shader(GL_FRAGMENT_SHADER, 2,
+						 sources);
+
+	shader->program = glCreateProgram();
+	glAttachShader(shader->program, shader->vertex_shader);
+	glAttachShader(shader->program, shader->fragment_shader);
+	glBindAttribLocation(shader->program, 0, "position");
+	glBindAttribLocation(shader->program, 1, "texcoord");
+
+	glLinkProgram(shader->program);
+	glGetProgramiv(shader->program, GL_LINK_STATUS, &status);
+	if (!status) {
+		glGetProgramInfoLog(shader->program, sizeof(msg), NULL, msg);
+		clv_err("link info: %s", msg);
+		return -1;
+	}
+
+	shader->proj_uniform = glGetUniformLocation(shader->program, "proj");
+	shader->tex_uniforms[0] = glGetUniformLocation(shader->program, "tex");
+	shader->tex_uniforms[1] = glGetUniformLocation(shader->program, "tex1");
+	shader->tex_uniforms[2] = glGetUniformLocation(shader->program, "tex2");
+	shader->alpha_uniform = glGetUniformLocation(shader->program, "alpha");
+	shader->color_uniform = glGetUniformLocation(shader->program, "color");
+
+	return 0;
+}
+
+static void use_shader(struct gl_display *disp, struct gl_shader *shader)
+{
+	s32 ret;
+
+	if (!shader->program) {
+		ret = load_shader(shader, disp,
+				  shader->vertex_source,
+				  shader->fragment_source);
+		if (ret < 0)
+			clv_err("failed to compile shader");
+	}
+
+	if (disp->current_shader == shader)
+		return;
+
+	glUseProgram(shader->program);
+	disp->current_shader = shader;
+}
+
+static void shader_uniforms(struct gl_shader *shader, struct clv_view *v,
+			    struct clv_output *output)
+{
+	s32 i;
+	struct gl_surface_state *gs = get_surface_state(v->surface);
+/* TODO
+	struct gl_output_state *go = output->renderer_state;
+*/
+	static const GLfloat projmat_normal[16] = { /* transpose */
+		 2.0f,  0.0f, 0.0f, 0.0f,
+		 0.0f,  2.0f, 0.0f, 0.0f,
+		 0.0f,  0.0f, 1.0f, 0.0f,
+		-1.0f, -1.0f, 0.0f, 1.0f
+	};
+	static const GLfloat projmat_yinvert[16] = { /* transpose */
+		 2.0f,  0.0f, 0.0f, 0.0f,
+		 0.0f, -2.0f, 0.0f, 0.0f,
+		 0.0f,  0.0f, 1.0f, 0.0f,
+		-1.0f,  1.0f, 0.0f, 1.0f
+	};
+
+/* TODO
+	glUniformMatrix4fv(shader->proj_uniform,
+			   1, GL_FALSE, go->output_matrix.d);
+*/
+	if (gs->y_inverted) {
+		glUniformMatrix4fv(shader->proj_uniform,
+				   1, GL_FALSE, projmat_yinvert);
+	} else {
+		glUniformMatrix4fv(shader->proj_uniform,
+				   1, GL_FALSE, projmat_normal);
+	}
+	glUniform4fv(shader->color_uniform, 1, gs->color);
+	glUniform1f(shader->alpha_uniform, v->alpha);
+
+	for (i = 0; i < gs->count_textures; i++)
+		glUniform1i(shader->tex_uniforms[i], i);
+}
+
+static s32 texture_region(struct clv_view *v, struct clv_region *region,
+			  struct clv_region *surf_region)
+{
+	return 0;
+}
+
+static void repaint_region(struct clv_view *view, struct clv_region *region,
+			   struct clv_region *surf_region)
+{
+	struct clv_compositor *c = view->surface->c;
+	struct gl_display *disp = get_display(c);
+	GLfloat *v;
+	u32 *vtxcnt;
+	s32 i, first, nfans;
+
+	nfans = texture_region(view, region, surf_region);
+
+	v = disp->vertices.data;
+	vtxcnt = disp->vtxcnt.data;
+
+	/* position: */
+	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(*v), &v[0]);
+	glEnableVertexAttribArray(0);
+
+	/* texcoord: */
+	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(*v), &v[2]);
+	glEnableVertexAttribArray(1);
+
+	for (i = 0, first = 0; i < nfans; i++) {
+		glDrawArrays(GL_TRIANGLE_FAN, first, vtxcnt[i]);
+		first += vtxcnt[i];
+	}
+
+	glDisableVertexAttribArray(1);
+	glDisableVertexAttribArray(0);
+
+	disp->vertices.size = 0;
+	disp->vtxcnt.size = 0;
+}
+
+static void draw_view(struct clv_view *v, struct clv_output *output,
+		      struct clv_region *damage)
+{
+	struct clv_compositor *c = v->surface->c;
+	struct gl_display *disp = get_display(c);
+	struct gl_surface_state *gs = get_surface_state(v->surface);
+	struct clv_region surface_opaque, surface_blend;
+	struct clv_region view_area, output_area;
+	GLint filter;
+	s32 i;
+	
+	if (!gs->shader)
+		return;
+
+	clv_region_init_rect(&view_area, v->area.pos.x, v->area.pos.y,
+			     v->area.w, v->area.h);
+	clv_region_init_rect(&output_area, output->render_area.pos.x,
+			     output->render_area.pos.y,
+			     output->render_area.w,
+			     output->render_area.h);
+	clv_region_intersect(&view_area, &view_area, &output_area);
+
+	if (!clv_region_is_not_empty(&view_area))
+		goto out;
+
+	clv_region_translate(&view_area, -output->render_area.pos.x,
+			     -output->render_area.pos.y);
+	clv_region_subtract(damage, damage, &view_area);
+
+	glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+
+	use_shader(disp, gs->shader);
+	shader_uniforms(gs->shader, v, output);
+
+	filter = GL_LINEAR; /* GL_NEAREST */
+
+	for (i = 0; i < gs->count_textures; i++) {
+		glActiveTexture(GL_TEXTURE0 + i);
+		glBindTexture(gs->target, gs->textures[i]);
+		glTexParameteri(gs->target, GL_TEXTURE_MIN_FILTER, filter);
+		glTexParameteri(gs->target, GL_TEXTURE_MAG_FILTER, filter);
+	}
+
+	clv_region_init_rect(&surface_blend, 0, 0, v->surface->w,v->surface->h);
+	clv_region_subtract(&surface_blend, &surface_blend,&v->surface->opaque);
+
+	clv_region_init(&surface_opaque);
+	clv_region_copy(&surface_opaque, &v->surface->opaque);
+
+	if (clv_region_is_not_empty(&surface_opaque)) {
+		if (gs->shader == &disp->texture_shader_rgba) {
+			use_shader(disp, &disp->texture_shader_rgbx);
+			shader_uniforms(&disp->texture_shader_rgbx, v, output);
+		}
+		if (v->alpha < 1.0f)
+			glEnable(GL_BLEND);
+		else
+			glDisable(GL_BLEND);
+		repaint_region(v, &view_area, &surface_opaque);
+	}
+
+	if (clv_region_is_not_empty(&surface_blend)) {
+		use_shader(disp, gs->shader);
+		glEnable(GL_BLEND);
+		repaint_region(v, &view_area, &surface_blend);
+	}
+
+	clv_region_fini(&surface_blend);
+	clv_region_fini(&surface_opaque);
+
+out:
+	clv_region_fini(&view_area);
+	clv_region_fini(&output_area);
+}
+
+static void repaint_views(struct clv_output *output, struct clv_region *damage)
+{
+	struct clv_compositor *c = output->c;
+	struct clv_view *view;
+
+	list_for_each_entry_reverse(view, &c->views, link) {
+		/* TODO do not draw cursor view and overlay view */
+		if (view->dirty) {
+			draw_view(view, output, damage);
+			view->dirty = 0;
+		}
+	}
+}
+
+static void gl_repaint_output(struct clv_output *output)
+{
+	struct gl_output_state *go = output->renderer_state;
+	struct clv_compositor *c = output->c;
+	struct gl_display *disp = get_display(c);
+	struct clv_rect *area = &output->render_area;
+	struct clv_region total_damage;
+	EGLBoolean ret;
+	static s32 errored = 0;
+
+	if (gl_switch_output(output) < 0)
+		return;
+
+	glViewport(0, 0, area->w, area->h);
+
+	clv_region_init_rect(&total_damage, 0, 0, area->w, area->h);
+	repaint_views(output, &total_damage);
+	clv_region_fini(&total_damage);
+	/* TODO send frame signal */
+	ret = eglSwapBuffers(disp->egl_display, go->egl_surface);
+	if (ret == EGL_FALSE && !errored) {
+		errored = 1;
+		clv_err("Failed to call eglSwapBuffers.");
+		egl_error_state();
+	}
+}
+
+static GLenum gl_format_from_internal(GLenum internal_format)
+{
+	switch (internal_format) {
+	case GL_R8_EXT:
+		return GL_RED_EXT;
+	case GL_RG8_EXT:
+		return GL_RG_EXT;
+	default:
+		return internal_format;
+	}
+}
+
+static void gl_flush_damage(struct clv_surface *surface)
+{
+	struct gl_display *disp = get_display(surface->c);
+	struct gl_surface_state *gs = get_surface_state(surface);
+	struct clv_buffer *buffer = gs->buffer;
+	struct clv_box *boxes, *box;
+	struct gl_shm_buffer *shm_buffer;
+	u8 *data;
+	s32 i, j, count_boxes;
+
+	clv_region_union(&gs->texture_damage, &gs->texture_damage,
+			 &surface->damage);
+
+	if (!buffer)
+		return;
+
+	if (!clv_region_is_not_empty(&gs->texture_damage)
+		&& !gs->needs_full_upload)
+		goto done;
+
+	if (surface->view)
+		surface->view->dirty = 1; /* need to re-composite */
+
+	shm_buffer = container_of(buffer, struct gl_shm_buffer, base);
+	data = shm_buffer->shm.map;
+	assert(data);
+	if (!disp->support_unpack_subimage) {
+		/* begin access buffer */
+		for (j = 0; j < gs->count_textures; j++) {
+			glBindTexture(GL_TEXTURE_2D, gs->textures[j]);
+			glTexImage2D(GL_TEXTURE_2D, 0,
+				     gs->gl_format[j],
+				     gs->pitch / gs->hsub[j],
+				     buffer->h / gs->vsub[j],
+				     0,
+				     gl_format_from_internal(gs->gl_format[j]),
+				     gs->gl_pixel_type,
+				     data + gs->offset[j]);
+		}
+		/* end access buffer */
+		goto done;
+	}
+
+	if (gs->needs_full_upload) {
+		glPixelStorei(GL_UNPACK_SKIP_PIXELS_EXT, 0);
+		glPixelStorei(GL_UNPACK_SKIP_ROWS_EXT, 0);
+		/* begin access buffer */
+		for (j = 0; j < gs->count_textures; j++) {
+			glBindTexture(GL_TEXTURE_2D, gs->textures[j]);
+			glPixelStorei(GL_UNPACK_ROW_LENGTH_EXT,
+				      gs->pitch / gs->hsub[j]);
+			glTexImage2D(GL_TEXTURE_2D, 0,
+				     gs->gl_format[j],
+				     gs->pitch / gs->hsub[j],
+				     buffer->h / gs->vsub[j],
+				     0,
+				     gl_format_from_internal(gs->gl_format[j]),
+				     gs->gl_pixel_type,
+				     data + gs->offset[j]);
+		}
+		/* end access buffer */
+		goto done;
+	}
+
+	boxes = clv_region_boxes(&gs->texture_damage, &count_boxes);
+	/* begin access buffer */
+	for (i = 0; i < count_boxes; i++) {
+		box = &boxes[i];
+		for (j = 0; j < gs->count_textures; j++) {
+			glBindTexture(GL_TEXTURE_2D, gs->textures[j]);
+			glPixelStorei(GL_UNPACK_ROW_LENGTH_EXT,
+				      gs->pitch / gs->hsub[j]);
+			glPixelStorei(GL_UNPACK_SKIP_PIXELS_EXT,
+				      box->p1.x / gs->hsub[j]);
+			glPixelStorei(GL_UNPACK_SKIP_ROWS_EXT,
+				      box->p1.y / gs->vsub[j]);
+			glTexSubImage2D(GL_TEXTURE_2D, 0,
+					box->p1.x / gs->hsub[j],
+					box->p1.y / gs->vsub[j],
+					(box->p2.x - box->p1.x) / gs->hsub[j],
+					(box->p2.y - box->p1.y) / gs->vsub[j],
+					gl_format_from_internal(
+						gs->gl_format[j]),
+					gs->gl_pixel_type,
+					data + gs->offset[j]);
+		}
+	}
+	/* end access buffer */
+
+done:
+	clv_region_fini(&gs->texture_damage);
+	clv_region_init(&gs->texture_damage);
+	gs->needs_full_upload = 0;
+}
+
+static void gl_display_destroy(struct clv_compositor *c)
+{
+	struct gl_display *disp = get_display(c);
+
+	eglMakeCurrent(disp->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
+		       EGL_NO_CONTEXT);
+	if (disp->dummy_surface != EGL_NO_SURFACE)
+		eglDestroySurface(disp->egl_display, disp->dummy_surface);
+	eglTerminate(disp->egl_display);
+	eglReleaseThread();
+	clv_array_release(&disp->vertices);
+	clv_array_release(&disp->vtxcnt);
+	free(disp);
+}
+
+static s32 gl_output_state_create(struct clv_output *output,
+				   EGLSurface surface)
+{
+	struct gl_output_state *go;
+
+	go = calloc(1, sizeof(*go));
+	if (!go)
+		return -ENOMEM;
+
+	go->egl_surface = surface;
+	output->renderer_state = go;
+	return 0;
+}
+
+static EGLSurface gl_create_output_surface(struct gl_display *disp,
+					   EGLNativeWindowType legacy_win,
+					   void *window,
+					   s32 *formats,
+					   s32 count_fmts)
+{
+	EGLSurface egl_surface;
+	EGLConfig egl_config;
+
+	if (egl_choose_config(disp, gl_opaque_attribs, formats, count_fmts,
+			      &egl_config) < 0) {
+		clv_err("failed to choose EGL config for output");
+		return EGL_NO_SURFACE;
+	}
+
+	if (egl_config != disp->egl_config) {
+		clv_err("attempt to use different config for output.");
+		return EGL_NO_SURFACE;
+	}
+
+	if (disp->create_platform_window && window) {
+		egl_surface = disp->create_platform_window(disp->egl_display,
+							   egl_config,
+							   window,
+							   NULL);
+	} else if (legacy_win) {
+		egl_surface = eglCreateWindowSurface(disp->egl_display,
+						     egl_config,
+						     legacy_win, NULL);
+	} else {
+		clv_err("create_platform_window = %p, window = %p, "
+			"legacy_win = %lu", disp->create_platform_window,
+			window, (u64)legacy_win);
+		return EGL_NO_SURFACE;
+	}
+
+	return egl_surface;
+}
+
+static s32 gl_output_create(struct clv_output *output,
+			    EGLNativeWindowType window_for_legacy,
+			    void *window,
+			    s32 *formats,
+			    s32 count_fmts)
+{
+	struct clv_compositor *c = output->c;
+	struct gl_display *disp = get_display(c);
+	EGLSurface egl_surface;
+	s32 ret;
+
+	egl_surface = gl_create_output_surface(disp, window_for_legacy,
+					       window, formats, count_fmts);
+	if (egl_surface == EGL_NO_SURFACE) {
+		clv_err("failed to create output surface.");
+		return -1;
+	}
+
+	ret = gl_output_state_create(output, egl_surface);
+	if (ret < 0)
+		eglDestroySurface(disp->egl_display, egl_surface);
+
+	return ret;
+}
+
+static void gl_output_destroy(struct clv_output *output)
+{
+	struct gl_display *disp = get_display(output->c);
+	struct gl_output_state *go = output->renderer_state;
+
+	eglMakeCurrent(disp->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
+		       EGL_NO_CONTEXT);
+	eglDestroySurface(disp->egl_display, go->egl_surface);
+	free(go);
+}
+
+s32 gl_display_create(struct clv_compositor *c, s32 *formats, s32 count_fmts,
+		      s32 no_winsys, void *native_window)
+{
+	struct gl_display *disp;
+	EGLint major, minor;
+
+	disp = calloc(1, sizeof(*disp));
+	if (!disp)
+		return -ENOMEM;
+
+	disp->egl_display = EGL_NO_DISPLAY;
+
+	if (no_winsys) {
+		if (!get_platform_display) {
+			get_platform_display = (void *)eglGetProcAddress(
+				"eglGetPlatformDisplayEXT");
+		}
+		if (!get_platform_display)
+			goto err1;
+		disp->egl_display = get_platform_display(EGL_PLATFORM_GBM_KHR,
+							 native_window,
+							 NULL);
+	} else {
+		disp->egl_display = eglGetDisplay(native_window);
+	}
+
+	if (disp->egl_display == EGL_NO_DISPLAY) {
+		clv_err("failed to create EGL display.");
+		goto err1;
+	}
+
+	if (!eglInitialize(disp->egl_display, &major, &minor)) {
+		clv_err("failed to initialize EGL.");
+		goto err3;
+	}
+
+	egl_info(disp->egl_display);
+
+	if (egl_choose_config(disp, gl_opaque_attribs, formats, count_fmts,
+			      &disp->egl_config) < 0) {
+		clv_err("failed to choose EGL config");
+		goto err2;
+	}
+
+	if (set_egl_extensions(disp) < 0) {
+		clv_err("failed to set EGL extensions.");
+		goto err3;
+	}
+
+	if (disp->support_surfaceless_context) {
+		disp->dummy_surface = EGL_NO_SURFACE;
+	} else {
+		clv_info("EGL_KHR_surfaceless_context unavailable. "
+			 "Tring PbufferSurface");
+		if (create_pbuffer_surface(disp) < 0)
+			goto err3;
+	}
+
+	if (gl_setup(c, disp->dummy_surface) < 0)
+		goto err3;
+
+	clv_array_init(&disp->vertices);
+	clv_array_init(&disp->vtxcnt);
+
+	clv_signal_init(&disp->destroy_signal);
+
+	disp->base.repaint_output = gl_repaint_output;
+	disp->base.flush_damage = gl_flush_damage;
+	disp->base.attach_buffer = gl_attach_buffer;
+	disp->base.output_create = gl_output_create;
+	disp->base.output_destroy = gl_output_destroy;
+	disp->base.destroy = gl_display_destroy;
+
+	c->renderer = &disp->base;
+
+	return 0;
+
+err3:
+	egl_error_state();
+err2:
+	eglTerminate(disp->egl_display);
+err1:
+	free(disp);
+	return -1;
+}
+
