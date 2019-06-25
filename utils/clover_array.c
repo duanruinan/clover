@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <string.h>
 #include <clover_utils.h>
+#include <clover_log.h>
 #include <clover_array.h>
 
 void clv_array_init(struct clv_array *array)
@@ -15,6 +16,7 @@ void clv_array_release(struct clv_array *array)
 	if (array->data)
 		free(array->data);
 	array->data = NULL;
+	memset(array, 0, sizeof(*array));
 }
 
 void * clv_array_add(struct clv_array *array, u32 size)

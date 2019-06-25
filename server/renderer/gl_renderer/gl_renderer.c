@@ -16,6 +16,61 @@
 #include <clover_signal.h>
 #include <compositor.h>
 
+static u8 gles_dbg = 0;
+static u8 egl_dbg = 0;
+
+#define gles_debug(fmt, ...) do { \
+	if (gles_dbg >= 3) { \
+		clv_debug("[GLES]" fmt, ##__VA_ARGS__); \
+	} \
+} while (0);
+
+#define gles_info(fmt, ...) do { \
+	if (gles_dbg >= 2) { \
+		clv_info("[GLES]" fmt, ##__VA_ARGS__); \
+	} \
+} while (0);
+
+#define gles_notice(fmt, ...) do { \
+	if (gles_dbg >= 1) { \
+		clv_notice("[GLES]" fmt, ##__VA_ARGS__); \
+	} \
+} while (0);
+
+#define gles_warn(fmt, ...) do { \
+	clv_warn("[GLES]" fmt, ##__VA_ARGS__); \
+} while (0);
+
+#define gles_err(fmt, ...) do { \
+	clv_err("[GLES]" fmt, ##__VA_ARGS__); \
+} while (0);
+
+#define egl_debug(fmt, ...) do { \
+	if (egl_dbg >= 3) { \
+		clv_debug("[EGL ]" fmt, ##__VA_ARGS__); \
+	} \
+} while (0);
+
+#define egl_info(fmt, ...) do { \
+	if (egl_dbg >= 2) { \
+		clv_info("[EGL ]" fmt, ##__VA_ARGS__); \
+	} \
+} while (0);
+
+#define egl_notice(fmt, ...) do { \
+	if (egl_dbg >= 1) { \
+		clv_notice("[EGL ]" fmt, ##__VA_ARGS__); \
+	} \
+} while (0);
+
+#define egl_warn(fmt, ...) do { \
+	clv_warn("[EGL ]" fmt, ##__VA_ARGS__); \
+} while (0);
+
+#define egl_err(fmt, ...) do { \
+	clv_err("[EGL ]" fmt, ##__VA_ARGS__); \
+} while (0);
+
 static const char vertex_shader[] =
 	"uniform mat4 proj;\n"
 	"attribute vec2 position;\n"
@@ -48,8 +103,61 @@ static const char texture_fragment_shader_rgbx[] =
 	"   gl_FragColor.a = alpha;\n"
 	;
 
+#define FRAGMENT_CONVERT_YUV						\
+	"  y *= alpha;\n"						\
+	"  u *= alpha;\n"						\
+	"  v *= alpha;\n"						\
+	"  gl_FragColor.r = y + 1.792 * v;\n"			\
+	"  gl_FragColor.g = y - 0.213 * u - 0.534 * v;\n"	\
+	"  gl_FragColor.b = y + 2.114 * u;\n"			\
+	"  gl_FragColor.a = alpha;\n"
+
+static const char texture_fragment_shader_y_u_v[] =
+	"precision mediump float;\n"
+	"uniform sampler2D tex;\n"
+	"uniform sampler2D tex1;\n"
+	"uniform sampler2D tex2;\n"
+	"varying vec2 v_texcoord;\n"
+	"uniform float alpha;\n"
+	"void main() {\n"
+	"  float y = 1.16438356 * (texture2D(tex, v_texcoord).x - 0.0627);\n"
+	"  float u = texture2D(tex1, v_texcoord).x - 0.502;\n"
+	"  float v = texture2D(tex2, v_texcoord).x - 0.502;\n"
+	FRAGMENT_CONVERT_YUV
+	;
+
 static const char fragment_brace[] =
 	"}\n";
+
+struct dma_buffer {
+	struct clv_buffer base;
+	EGLImageKHR image;
+	struct list_head link;
+	struct gl_display *disp;
+};
+
+struct polygon8 {
+	float x[8];
+	float y[8];
+	s32 n;
+};
+
+struct clip_context {
+	struct {
+		float x;
+		float y;
+	} prev;
+
+	struct {
+		float x1, y1;
+		float x2, y2;
+	} clip;
+
+	struct {
+		float *x;
+		float *y;
+	} vertices;
+};
 
 static const EGLint gl_opaque_attribs[] = {
 	EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
@@ -59,11 +167,6 @@ static const EGLint gl_opaque_attribs[] = {
 	EGL_ALPHA_SIZE, 0,
 	EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
 	EGL_NONE,
-};
-
-struct gl_shm_buffer {
-	struct clv_buffer base;
-	struct clv_shm shm;
 };
 
 struct gl_output_state {
@@ -91,15 +194,22 @@ struct gl_display {
 	struct clv_array vertices;
 	struct clv_array vtxcnt;
 
+	PFNGLEGLIMAGETARGETTEXTURE2DOESPROC image_target_texture_2d;
+	PFNEGLCREATEIMAGEKHRPROC create_image;
+	PFNEGLDESTROYIMAGEKHRPROC destroy_image;
 	PFNEGLCREATEPLATFORMWINDOWSURFACEEXTPROC create_platform_window;
 
 	s32 support_unpack_subimage;
 	s32 support_context_priority;
 	s32 support_surfaceless_context;
 	s32 support_texture_rg;
+	s32 support_dmabuf_import;
+
+	struct list_head dmabuf_images;
 
 	struct gl_shader texture_shader_rgba;
 	struct gl_shader texture_shader_rgbx;
+	struct gl_shader texture_shader_y_u_v;
 	struct gl_shader *current_shader;
 
 	struct clv_signal destroy_signal;
@@ -118,7 +228,6 @@ struct gl_surface_state {
 	GLenum gl_pixel_type;
 
 	GLenum target;
-	s32 count_images;
 
 	s32 pitch;
 	s32 h;
@@ -129,6 +238,8 @@ struct gl_surface_state {
 	s32 vsub[3];
 
 	struct clv_surface *surface;
+
+	enum clv_buffer_type buf_type;
 
 	struct clv_buffer *buffer;
 
@@ -168,7 +279,7 @@ static void egl_error_state(void)
 	EGLint err;
 
 	err = eglGetError();
-	clv_err("EGL err: %s (0x%04lX)", egl_strerror(err), (u64)err);
+	egl_err("EGL err: %s (0x%04lX)", egl_strerror(err), (u64)err);
 }
 
 static inline struct gl_display *get_display(struct clv_compositor *c)
@@ -184,8 +295,12 @@ static s32 match_config_to_visual(EGLDisplay egl_display, EGLint visual_id,
 
 	for (i = 0; i < count; i++) {
 		if (!eglGetConfigAttrib(egl_display, configs[i],
-					EGL_NATIVE_VISUAL_ID, &id))
+					EGL_NATIVE_VISUAL_ID, &id)) {
+			egl_warn("get VISUAL_ID failed.");
 			continue;
+		} else {
+			egl_debug("get VISUAL_ID ok. %u %u", id, visual_id);
+		}
 		if (id == visual_id)
 			return i;
 	}
@@ -195,7 +310,7 @@ static s32 match_config_to_visual(EGLDisplay egl_display, EGLint visual_id,
 
 static s32 egl_choose_config(struct gl_display *disp, const EGLint *attribs,
 			     const EGLint *visual_ids, const s32 count_ids,
-			     EGLConfig *config_matched)
+			     EGLConfig *config_matched, EGLint *vid)
 {
 	EGLint count_configs = 0;
 	EGLint count_matched = 0;
@@ -203,9 +318,10 @@ static s32 egl_choose_config(struct gl_display *disp, const EGLint *attribs,
 	s32 i, config_index = -1;
 
 	if (!eglGetConfigs(disp->egl_display, NULL, 0, &count_configs)) {
-		clv_err("Cannot get EGL configs.");
+		egl_err("Cannot get EGL configs.");
 		return -1;
 	}
+	egl_debug("count_configs = %d", count_configs);
 
 	configs = calloc(count_configs, sizeof(*configs));
 	if (!configs)
@@ -214,9 +330,10 @@ static s32 egl_choose_config(struct gl_display *disp, const EGLint *attribs,
 	if (!eglChooseConfig(disp->egl_display, attribs, configs,
 			     count_configs, &count_matched)
 	    || !count_matched) {
-		clv_err("cannot select appropriate configs.");
+		egl_err("cannot select appropriate configs.");
 		goto out1;
 	}
+	egl_debug("count_matched = %d", count_matched);
 
 	if (!visual_ids || count_ids == 0)
 		config_index = 0;
@@ -226,18 +343,32 @@ static s32 egl_choose_config(struct gl_display *disp, const EGLint *attribs,
 						      visual_ids[i],
 						      configs,
 						      count_matched);
+		egl_debug("config_index = %d i = %d count_ids = %d",
+			  config_index, i, count_ids);
 	}
 
 	if (config_index != -1)
 		*config_matched = configs[config_index];
 
 out1:
+	if (visual_ids) {
+		*vid = visual_ids[i - 1];
+	} else {
+		for (i = 0; i < count_matched; i++) {
+			if (!eglGetConfigAttrib(disp->egl_display, configs[0],
+						EGL_NATIVE_VISUAL_ID, vid)) {
+				egl_err("Get visual id failed.");
+				continue;
+			}
+			break;
+		}
+	}
 	free(configs);
 	if (config_index == -1)
 		return -1;
 
 	if (i > 1)
-		clv_warn("Unable to use first choice EGL config with ID "
+		egl_warn("Unable to use first choice EGL config with ID "
 			 "0x%x, succeeded with alternate ID 0x%x",
 			 visual_ids[0], visual_ids[i - 1]);
 
@@ -275,7 +406,7 @@ static void set_egl_client_extensions(struct gl_display *disp)
 	extensions = (const char *)eglQueryString(EGL_NO_DISPLAY,
 						  EGL_EXTENSIONS);
 	if (!extensions) {
-		clv_info("cannot query client EGL_EXTENSIONS");
+		egl_info("cannot query client EGL_EXTENSIONS");
 		return;
 	}
 
@@ -283,10 +414,10 @@ static void set_egl_client_extensions(struct gl_display *disp)
 		disp->create_platform_window = (void *)eglGetProcAddress(
 				"eglCreatePlatformWindowSurfaceEXT");
 		if (!disp->create_platform_window)
-			clv_warn("failed to call "
+			egl_warn("failed to call "
 				 "eglCreatePlatformWindowSurfaceEXT");
 	} else {
-		clv_warn("EGL_EXT_platform_base not supported.");
+		egl_warn("EGL_EXT_platform_base not supported.");
 	}
 }
 
@@ -294,10 +425,12 @@ static s32 set_egl_extensions(struct gl_display *disp)
 {
 	const char *extensions;
 
+	disp->create_image = (void *)eglGetProcAddress("eglCreateImageKHR");
+	disp->destroy_image = (void *)eglGetProcAddress("eglDestroyImageKHR");
 	extensions = (const char *)eglQueryString(disp->egl_display,
 						  EGL_EXTENSIONS);
 	if (!extensions) {
-		clv_err("cannot query EGL_EXTENSIONS");
+		egl_err("cannot query EGL_EXTENSIONS");
 		return -1;
 	}
 
@@ -307,29 +440,34 @@ static s32 set_egl_extensions(struct gl_display *disp)
 	if (check_egl_extension(extensions, "EGL_KHR_surfaceless_context"))
 		disp->support_surfaceless_context = 1;
 
+	if (check_egl_extension(extensions, "EGL_EXT_image_dma_buf_import"))
+		disp->support_dmabuf_import = 1;
+
 	set_egl_client_extensions(disp);
-	clv_info("EGL_IMG_context_priority: %s",
+	egl_info("EGL_IMG_context_priority: %s",
 		 disp->support_context_priority ? "Y" : "N");
-	clv_info("EGL_KHR_surfaceless_context: %s",
+	egl_info("EGL_KHR_surfaceless_context: %s",
 		 disp->support_surfaceless_context ? "Y" : "N");
+	egl_info("EGL_EXT_image_dma_buf_import: %s",
+		 disp->support_dmabuf_import ? "Y" : "N");
 	return 0;
 }
 
-static void egl_info(EGLDisplay disp)
+static void print_egl_info(EGLDisplay disp)
 {
 	const char *str;
 
 	str = eglQueryString(disp, EGL_VERSION);
-	clv_info("EGL version: %s", str ? str : "(null)");
+	egl_info("EGL version: %s", str ? str : "(null)");
 
 	str = eglQueryString(disp, EGL_VENDOR);
-	clv_info("EGL vendor: %s", str ? str : "(null)");
+	egl_info("EGL vendor: %s", str ? str : "(null)");
 
 	str = eglQueryString(disp, EGL_CLIENT_APIS);
-	clv_info("EGL client APIs: %s", str ? str : "(null)");
+	egl_info("EGL client APIs: %s", str ? str : "(null)");
 
 	str = eglQueryString(disp, EGL_EXTENSIONS);
-	clv_info("EGL extensions: %s", str ? str : "(null)");
+	egl_info("EGL extensions: %s", str ? str : "(null)");
 }
 
 static void gl_info(void)
@@ -337,24 +475,25 @@ static void gl_info(void)
 	const char *str;
 
 	str = (char *)glGetString(GL_VERSION);
-	clv_info("GL version: %s", str ? str : "(null)");
+	gles_info("GL version: %s", str ? str : "(null)");
 
 	str = (char *)glGetString(GL_SHADING_LANGUAGE_VERSION);
-	clv_info("GLSL version: %s", str ? str : "(null)");
+	gles_info("GLSL version: %s", str ? str : "(null)");
 
 	str = (char *)glGetString(GL_VENDOR);
-	clv_info("GL vendor: %s", str ? str : "(null)");
+	gles_info("GL vendor: %s", str ? str : "(null)");
 
 	str = (char *)glGetString(GL_RENDERER);
-	clv_info("GL renderer: %s", str ? str : "(null)");
+	gles_info("GL renderer: %s", str ? str : "(null)");
 
 	str = (char *)glGetString(GL_EXTENSIONS);
-	clv_info("GL extensions: %s", str ? str : "(null)");
+	gles_info("GL extensions: %s", str ? str : "(null)");
 }
 
 static s32 create_pbuffer_surface(struct gl_display *disp)
 {
 	EGLConfig pbuffer_config;
+	EGLint vid;
 
 	static const EGLint pbuffer_config_attribs[] = {
 		EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
@@ -373,8 +512,8 @@ static s32 create_pbuffer_surface(struct gl_display *disp)
 	};
 
 	if (egl_choose_config(disp, pbuffer_config_attribs, NULL, 0,
-			      &pbuffer_config) < 0) {
-		clv_err("failed to choose EGL config for PbufferSurface");
+			      &pbuffer_config, &vid) < 0) {
+		egl_err("failed to choose EGL config for PbufferSurface");
 		return -1;
 	}
 
@@ -383,7 +522,7 @@ static s32 create_pbuffer_surface(struct gl_display *disp)
 						      pbuffer_attribs);
 
 	if (disp->dummy_surface == EGL_NO_SURFACE) {
-		clv_err("failed to create PbufferSurface");
+		egl_err("failed to create PbufferSurface");
 		return -1;
 	}
 
@@ -416,6 +555,10 @@ static void set_shaders(struct clv_compositor *c)
 
 	disp->texture_shader_rgbx.vertex_source = vertex_shader;
 	disp->texture_shader_rgbx.fragment_source =texture_fragment_shader_rgbx;
+
+	disp->texture_shader_y_u_v.vertex_source = vertex_shader;
+	disp->texture_shader_y_u_v.fragment_source =
+						texture_fragment_shader_y_u_v;
 }
 
 static s32 gl_setup(struct clv_compositor *c, EGLSurface egl_surface)
@@ -431,7 +574,7 @@ static s32 gl_setup(struct clv_compositor *c, EGLSurface egl_surface)
 	EGLint value = EGL_CONTEXT_PRIORITY_MEDIUM_IMG;
 
 	if (!eglBindAPI(EGL_OPENGL_ES_API)) {
-		clv_err("failed to bind EGL_OPENGL_ES_API");
+		egl_err("failed to bind EGL_OPENGL_ES_API");
 		egl_error_state();
 		return -1;
 	}
@@ -456,13 +599,13 @@ static s32 gl_setup(struct clv_compositor *c, EGLSurface egl_surface)
 						     EGL_NO_CONTEXT,
 						     context_attribs);
 		if (disp->egl_context == EGL_NO_CONTEXT) {
-			clv_err("failed to create context");
+			egl_err("failed to create context");
 			egl_error_state();
 			return -1;
 		}
-		clv_info("Create OpenGLES2 context");
+		egl_info("Create OpenGLES2 context");
 	} else {
-		clv_info("Create OpenGLES3 context");
+		egl_info("Create OpenGLES3 context");
 	}
 
 	if (disp->support_context_priority) {
@@ -470,34 +613,36 @@ static s32 gl_setup(struct clv_compositor *c, EGLSurface egl_surface)
 				EGL_CONTEXT_PRIORITY_LEVEL_IMG, &value);
 
 		if (value != EGL_CONTEXT_PRIORITY_HIGH_IMG) {
-			clv_err("Failed to obtain a high priority context.");
+			egl_err("Failed to obtain a high priority context.");
 		}
 	}
 
 	ret = eglMakeCurrent(disp->egl_display, egl_surface,
 			     egl_surface, disp->egl_context);
 	if (ret == EGL_FALSE) {
-		clv_err("Failed to make EGL context current.");
+		egl_err("Failed to make EGL context current.");
 		egl_error_state();
 		return -1;
 	}
 
 	disp->gl_version = get_gl_version();
 	if (disp->gl_version == GEN_GL_VERSION_INVALID) {
-		clv_warn("failed to detect GLES version, "
-			 "defaulting to 2.0.");
+		gles_warn("failed to detect GLES version, "
+			  "defaulting to 2.0.");
 		disp->gl_version = GEN_GL_VERSION(2, 0);
 	}
 
 	gl_info();
+	disp->image_target_texture_2d =
+		(void *)eglGetProcAddress("glEGLImageTargetTexture2DOES");
 
 	extensions = (const char *)glGetString(GL_EXTENSIONS);
 	if (!extensions) {
-		clv_err("Cannot get GL extension string");
+		gles_err("Cannot get GL extension string");
 		return -1;
 	}
 	if (!check_egl_extension(extensions, "GL_EXT_texture_format_BGRA8888")){
-		clv_err("GL_EXT_texture_format_BGRA8888 not available");
+		gles_err("GL_EXT_texture_format_BGRA8888 not available");
 		return -1;
 	}
 
@@ -513,19 +658,33 @@ static s32 gl_setup(struct clv_compositor *c, EGLSurface egl_surface)
 
 	set_shaders(c);
 
-	clv_info("GL_EXT_texture_rg: %s",
-		 disp->support_texture_rg ? "Y" : "N");
-	clv_info("GL_EXT_unpack_subimage: %s",
-		 disp->support_unpack_subimage ? "Y" : "N");
+	gles_info("GL_EXT_texture_rg: %s",
+		  disp->support_texture_rg ? "Y" : "N");
+	gles_info("GL_EXT_unpack_subimage: %s",
+		  disp->support_unpack_subimage ? "Y" : "N");
 	return 0;
 }
 
 static void gl_surface_state_destroy(struct gl_surface_state *gs)
 {
+	struct clv_buffer *buffer;
+	struct dma_buffer *dmabuf;
+	struct gl_display *disp;
+
 	if (gs) {
 		if (gs->surface)
 			gs->surface->renderer_state = NULL;
 		glDeleteTextures(gs->count_textures, gs->textures);
+		buffer = gs->buffer;
+		if (buffer && buffer->type == CLV_BUF_TYPE_DMA) {
+			dmabuf = container_of(buffer, struct dma_buffer, base);
+			disp = dmabuf->disp;
+			if (dmabuf->image != EGL_NO_IMAGE_KHR) {
+				disp->destroy_image(disp->egl_display,
+						    dmabuf->image);
+				dmabuf->image = EGL_NO_IMAGE_KHR;
+			}
+		}
 		clv_region_fini(&gs->texture_damage);
 		free(gs);
 	}
@@ -602,23 +761,49 @@ static void alloc_textures(struct gl_surface_state *gs, s32 count_textures)
 	gs->count_textures = count_textures;
 	glBindTexture(gs->target, 0);
 }
+
+static void gl_attach_dma_buffer(struct clv_surface *surface,
+				 struct clv_buffer *buffer)
+{
+	struct clv_compositor *c = surface->c;
+	struct gl_display *disp = get_display(c);
+	struct gl_surface_state *gs = get_surface_state(surface);
+	struct dma_buffer *dmabuf = container_of(buffer, struct dma_buffer,
+						 base);
+
+	assert(dmabuf);
+	if (buffer->pixel_fmt == CLV_PIXEL_FMT_XRGB8888) {
+		surface->is_opaque = 1;
+	} else if (buffer->pixel_fmt == CLV_PIXEL_FMT_ARGB8888) {
+		surface->is_opaque = 0;
+	} else {
+		clv_err("illegal pixel fmt %u", buffer->pixel_fmt);
+		return;
+	}
+	gs->target = GL_TEXTURE_2D;
+	alloc_textures(gs, 1);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(gs->target, gs->textures[0]);
+	disp->image_target_texture_2d(gs->target, dmabuf->image);
+	gs->shader = &disp->texture_shader_rgba;
+	gs->pitch = buffer->stride / 4;
+	gs->h = buffer->h;
+	gs->buf_type = CLV_BUF_TYPE_DMA;
+	gs->y_inverted = 1;
+	gs->surface = surface;
+}
+
 static void gl_attach_shm_buffer(struct clv_surface *surface,
 				 struct clv_buffer *buffer)
 {
 	struct clv_compositor *c = surface->c;
 	struct gl_display *disp = get_display(c);
 	struct gl_surface_state *gs = get_surface_state(surface);
-	struct gl_shm_buffer *shm_buffer;
 	GLenum gl_format[3] = {0, 0, 0};
 	GLenum gl_pixel_type;
 	s32 pitch;
 	s32 count_planes;
 
-	shm_buffer = container_of(buffer, struct gl_shm_buffer, base);
-	if (clv_shm_init(&shm_buffer->shm, buffer->name, buffer->size, 0) < 0) {
-		clv_err("cannot open share memory buffer");
-		return;
-	}
 	count_planes = 1;
 	gs->offset[0] = 0;
 	gs->hsub[0] = 1;
@@ -639,8 +824,56 @@ static void gl_attach_shm_buffer(struct clv_surface *surface,
 		gl_pixel_type = GL_UNSIGNED_BYTE;
 		surface->is_opaque = 0;
 		break;
+	case CLV_PIXEL_FMT_YUV420P:
+		gs->shader = &disp->texture_shader_y_u_v;
+		pitch = buffer->stride;
+		gl_pixel_type = GL_UNSIGNED_BYTE;
+		count_planes = 3;
+		gs->offset[1] = gs->offset[0] + (pitch / gs->hsub[0]) *
+				(buffer->h / gs->vsub[0]);
+		gs->hsub[1] = 2;
+		gs->vsub[1] = 2;
+		gs->offset[2] = gs->offset[1] + (pitch / gs->hsub[1]) *
+				(buffer->h / gs->vsub[1]);
+		gs->hsub[2] = 2;
+		gs->vsub[2] = 2;
+		if (disp->support_texture_rg) {
+			gl_format[0] = GL_R8_EXT;
+			gl_format[1] = GL_R8_EXT;
+			gl_format[2] = GL_R8_EXT;
+		} else {
+			gl_format[0] = GL_LUMINANCE;
+			gl_format[1] = GL_LUMINANCE;
+			gl_format[2] = GL_LUMINANCE;
+		}
+		surface->is_opaque = 1;
+		break;
+	case CLV_PIXEL_FMT_YUV444P:
+		gs->shader = &disp->texture_shader_y_u_v;
+		pitch = buffer->stride;
+		gl_pixel_type = GL_UNSIGNED_BYTE;
+		count_planes = 3;
+		gs->offset[1] = gs->offset[0] + (pitch / gs->hsub[0]) *
+				(buffer->h / gs->vsub[0]);
+		gs->hsub[1] = 1;
+		gs->vsub[1] = 1;
+		gs->offset[2] = gs->offset[1] + (pitch / gs->hsub[1]) *
+				(buffer->h / gs->vsub[1]);
+		gs->hsub[2] = 1;
+		gs->vsub[2] = 1;
+		if (disp->support_texture_rg) {
+			gl_format[0] = GL_R8_EXT;
+			gl_format[1] = GL_R8_EXT;
+			gl_format[2] = GL_R8_EXT;
+		} else {
+			gl_format[0] = GL_LUMINANCE;
+			gl_format[1] = GL_LUMINANCE;
+			gl_format[2] = GL_LUMINANCE;
+		}
+		surface->is_opaque = 1;
+		break;
 	default:
-		clv_err("unknown pixel format %u", buffer->pixel_fmt);
+		gles_err("unknown pixel format %u", buffer->pixel_fmt);
 		return;
 	}
 
@@ -649,8 +882,10 @@ static void gl_attach_shm_buffer(struct clv_surface *surface,
 	    || gl_format[0] != gs->gl_format[0]
 	    || gl_format[1] != gs->gl_format[1]
 	    || gl_format[2] != gs->gl_format[2]
-	    || gl_pixel_type != gs->gl_pixel_type) {
+	    || gl_pixel_type != gs->gl_pixel_type
+	    || gs->buf_type != CLV_BUF_TYPE_SHM) {
 		gs->pitch = pitch;
+		gs->target = GL_TEXTURE_2D;
 		gs->h = buffer->h;
 		gs->gl_format[0] = gl_format[0];
 		gs->gl_format[1] = gl_format[1];
@@ -659,6 +894,7 @@ static void gl_attach_shm_buffer(struct clv_surface *surface,
 		gs->needs_full_upload = 1;
 		gs->y_inverted = 1;
 		gs->surface = surface;
+		gs->buf_type = CLV_BUF_TYPE_SHM;
 		alloc_textures(gs, count_planes);
 	}
 }
@@ -666,7 +902,9 @@ static void gl_attach_shm_buffer(struct clv_surface *surface,
 static void gl_attach_buffer(struct clv_surface *surface,
 			     struct clv_buffer *buffer)
 {
-	struct gl_surface_state *gs = get_surface_state(surface);
+	struct gl_surface_state *gs;
+
+	gs = get_surface_state(surface);
 
 	if (!buffer) {
 		glDeleteTextures(gs->count_textures, gs->textures);
@@ -680,8 +918,11 @@ static void gl_attach_buffer(struct clv_surface *surface,
 	if (buffer->type == CLV_BUF_TYPE_SHM) {
 		gl_attach_shm_buffer(surface, buffer);
 		gs->buffer = buffer;
+	} else if (buffer->type == CLV_BUF_TYPE_DMA) {
+		gl_attach_dma_buffer(surface, buffer);
+		gs->buffer = buffer;
 	} else {
-		clv_err("unknown buffer type %u", buffer->type);
+		gles_err("unknown buffer type %p %u", buffer, buffer->type);
 		gs->count_textures = 0;
 		gs->y_inverted = 1;
 		surface->is_opaque = 0;
@@ -696,10 +937,12 @@ static s32 gl_switch_output(struct clv_output *output)
 
 	if (eglMakeCurrent(disp->egl_display, go->egl_surface, go->egl_surface,
 			   disp->egl_context) == EGL_FALSE) {
-		if (errored)
+		if (errored) {
+			egl_err("eglMakeCurrent failed.");
 			return -1;
+		}
 		errored = 1;
-		clv_err("failed to switch EGL context.");
+		egl_err("failed to switch EGL context.");
 		egl_error_state();
 		return -1;
 	}
@@ -719,7 +962,7 @@ static s32 compile_shader(GLenum type, s32 count, const char **sources)
 	glGetShaderiv(s, GL_COMPILE_STATUS, &status);
 	if (!status) {
 		glGetShaderInfoLog(s, sizeof msg, NULL, msg);
-		clv_err("shader info: %s\n", msg);
+		gles_err("shader info: %s", msg);
 		return GL_NONE;
 	}
 
@@ -752,7 +995,7 @@ static s32 load_shader(struct gl_shader *shader, struct gl_display *disp,
 	glGetProgramiv(shader->program, GL_LINK_STATUS, &status);
 	if (!status) {
 		glGetProgramInfoLog(shader->program, sizeof(msg), NULL, msg);
-		clv_err("link info: %s", msg);
+		gles_err("link info: %s", msg);
 		return -1;
 	}
 
@@ -775,7 +1018,7 @@ static void use_shader(struct gl_display *disp, struct gl_shader *shader)
 				  shader->vertex_source,
 				  shader->fragment_source);
 		if (ret < 0)
-			clv_err("failed to compile shader");
+			gles_err("failed to compile shader");
 	}
 
 	if (disp->current_shader == shader)
@@ -793,23 +1036,32 @@ static void shader_uniforms(struct gl_shader *shader, struct clv_view *v,
 /* TODO
 	struct gl_output_state *go = output->renderer_state;
 */
-	static const GLfloat projmat_normal[16] = { /* transpose */
+	static GLfloat projmat_normal_temp[16] = { /* transpose */
 		 2.0f,  0.0f, 0.0f, 0.0f,
 		 0.0f,  2.0f, 0.0f, 0.0f,
 		 0.0f,  0.0f, 1.0f, 0.0f,
 		-1.0f, -1.0f, 0.0f, 1.0f
 	};
-	static const GLfloat projmat_yinvert[16] = { /* transpose */
+	static GLfloat projmat_yinvert_temp[16] = { /* transpose */
 		 2.0f,  0.0f, 0.0f, 0.0f,
 		 0.0f, -2.0f, 0.0f, 0.0f,
 		 0.0f,  0.0f, 1.0f, 0.0f,
 		-1.0f,  1.0f, 0.0f, 1.0f
 	};
+	static GLfloat projmat_yinvert[16];
+	static GLfloat projmat_normal[16];
 
-/* TODO
-	glUniformMatrix4fv(shader->proj_uniform,
-			   1, GL_FALSE, go->output_matrix.d);
-*/
+	memcpy(projmat_yinvert, projmat_yinvert_temp,
+	       sizeof(projmat_yinvert));
+	memcpy(projmat_normal, projmat_normal_temp,
+	       sizeof(projmat_normal));
+	
+	projmat_yinvert[0] /= output->render_area.w;
+	projmat_yinvert[5] /= output->render_area.h;
+
+	projmat_normal[0] /= output->render_area.w;
+	projmat_normal[5] /= output->render_area.h;
+
 	if (gs->y_inverted) {
 		glUniformMatrix4fv(shader->proj_uniform,
 				   1, GL_FALSE, projmat_yinvert);
@@ -824,14 +1076,206 @@ static void shader_uniforms(struct gl_shader *shader, struct clv_view *v,
 		glUniform1i(shader->tex_uniforms[i], i);
 }
 
-static s32 texture_region(struct clv_view *v, struct clv_region *region,
-			  struct clv_region *surf_region)
+static s32 merge_down(struct clv_box *a, struct clv_box *b,
+		      struct clv_box *merge)
 {
+	if (a->p1.x == b->p1.x && a->p2.x == b->p2.x && a->p1.y == b->p2.y) {
+		merge->p1.x = a->p1.x;
+		merge->p2.x = a->p2.x;
+		merge->p1.y = b->p1.y;
+		merge->p2.y = a->p2.y;
+		return 1;
+	}
 	return 0;
 }
 
+static s32 compress_bands(struct clv_box *inboxes, s32 count_in,
+			  struct clv_box **outboxes)
+{
+	s32 merged = 0;
+	struct clv_box *out, merge_rect;
+	s32 i, j, count_out;
+
+	if (!count_in) {
+		*outboxes = NULL;
+		return 0;
+	}
+
+	out = calloc(count_in, sizeof(struct clv_box));
+	out[0] = inboxes[0];
+	count_out = 1;
+	for (i = 1; i < count_in; i++) {
+		for (j = 0; j < count_out; j++) {
+			merged = merge_down(&inboxes[i], &out[j], &merge_rect);
+			if (merged) {
+				out[j] = merge_rect;
+				break;
+			}
+		}
+		if (!merged) {
+			out[count_out] = inboxes[i];
+			count_out++;
+		}
+	}
+	*outboxes = out;
+	return count_out;
+}
+
+#define clip(x, a, b)  MIN(MAX(x, a), b)
+static s32 clip_simple(struct clip_context *ctx, struct polygon8 *surf,
+		       float *ex, float *ey)
+{
+	s32 i;
+
+	for (i = 0; i < surf->n; i++) {
+		ex[i] = clip(surf->x[i], ctx->clip.x1, ctx->clip.x2);
+		ey[i] = clip(surf->y[i], ctx->clip.y1, ctx->clip.y2);
+	}
+	return surf->n;
+}
+
+static s32 calculate_edges(struct clv_view *v, struct clv_box *box,
+			   struct clv_box *surf_box, GLfloat *ex, GLfloat *ey,
+			   struct clv_pos *output_base)
+{
+
+	struct clip_context ctx;
+	s32 i;
+	GLfloat min_x, max_x, min_y, max_y;
+	struct polygon8 surf = {
+		{ surf_box->p1.x, surf_box->p2.x,
+		  surf_box->p2.x, surf_box->p1.x },
+		{ surf_box->p1.y, surf_box->p1.y,
+		  surf_box->p2.y, surf_box->p2.y },
+		4
+	};
+
+	ctx.clip.x1 = box->p1.x;
+	ctx.clip.y1 = box->p1.y;
+	ctx.clip.x2 = box->p2.x;
+	ctx.clip.y2 = box->p2.y;
+
+	/* transform surface to screen space: */
+	for (i = 0; i < surf.n; i++) {
+		surf.x[i] = surf.x[i] + v->area.pos.x;
+		surf.x[i] -= output_base->x;
+		surf.y[i] = surf.y[i] + v->area.pos.y;
+		surf.y[i] -= output_base->y;
+	}
+
+	/* find bounding box: */
+	min_x = max_x = surf.x[0];
+	min_y = max_y = surf.y[0];
+
+	for (i = 1; i < surf.n; i++) {
+		min_x = MIN(min_x, surf.x[i]);
+		max_x = MAX(max_x, surf.x[i]);
+		min_y = MIN(min_y, surf.y[i]);
+		max_y = MAX(max_y, surf.y[i]);
+	}
+
+	/* First, simple bounding box check to discard early transformed
+	 * surface rects that do not intersect with the clip region:
+	 */
+	if ((min_x >= ctx.clip.x2) || (max_x <= ctx.clip.x1) ||
+	    (min_y >= ctx.clip.y2) || (max_y <= ctx.clip.y1))
+		return 0;
+
+	/* Simple case, bounding box edges are parallel to surface edges,
+	 * there will be only four edges.  We just need to clip the surface
+	 * vertices to the clip rect bounds:
+	 */
+	return clip_simple(&ctx, &surf, ex, ey);
+}
+
+static s32 texture_region(struct clv_view *view, struct clv_region *region,
+			  struct clv_region *surf_region,
+			  struct clv_pos *output_base)
+{
+	struct gl_surface_state *gs = get_surface_state(view->surface);
+	struct clv_compositor *c = view->surface->c;
+	struct gl_display *disp = get_display(c);
+	s32 count_boxes, count_surf_boxes, count_raw_boxes, i, j, k;
+	s32 use_band_compression, n;
+	struct clv_box *raw_boxes, *boxes, *surf_boxes, *box, *surf_box;
+	u32 count_vtx = 0, *vtxcnt;
+	GLfloat *v, inv_w, inv_h;
+	GLfloat ex[8], ey[8];
+	GLfloat bx, by;
+
+	raw_boxes = clv_region_boxes(region, &count_raw_boxes);
+	surf_boxes = clv_region_boxes(surf_region, &count_surf_boxes);
+
+	if (count_raw_boxes < 4) {
+		use_band_compression = 0;
+		count_boxes = count_raw_boxes;
+		boxes = raw_boxes;
+	} else {
+		use_band_compression = 1;
+		count_boxes = compress_bands(raw_boxes, count_raw_boxes,&boxes);
+	}
+
+	v = clv_array_add(&disp->vertices,
+			  count_boxes * count_surf_boxes * 8 * 4 * sizeof(*v));
+	vtxcnt = clv_array_add(&disp->vtxcnt,
+			       count_boxes * count_surf_boxes *sizeof(*vtxcnt));
+	inv_w = 1.0f / gs->pitch;
+	inv_h = 1.0f / gs->h;
+
+	for (i = 0; i < count_boxes; i++) {
+		box = &boxes[i];
+		for (j = 0; j < count_surf_boxes; j++) {
+			surf_box = &surf_boxes[j];
+			n = calculate_edges(view, box, surf_box, ex, ey,
+					    output_base);
+			if (n < 3)
+				continue;
+			/* emit edge points: */
+			for (k = 0; k < n; k++) {
+				/* position: */
+				*(v++) = ex[k];
+				*(v++) = ey[k];
+				gles_debug("position (%f, %f)", *(v-2), *(v-1));
+
+				/* make buffer point */
+				bx = ex[k] - view->area.pos.x + output_base->x;
+				by = ey[k] - view->area.pos.y + output_base->y;
+
+				/* texcoord: */
+				*(v++) = bx * inv_w;
+				gles_debug("%f %f %u\n", bx, inv_w, gs->pitch);
+				if (gs->y_inverted) {
+					*(v++) = by * inv_h;
+				} else {
+					*(v++) = (gs->h - by) * inv_h;
+				}
+				gles_debug("texcoord (%f, %f)", *(v-2), *(v-1));
+			}
+			vtxcnt[count_vtx++] = n;
+		}
+	}
+
+	if (use_band_compression)
+		free(boxes);
+
+	return count_vtx;
+}
+
+static GLenum gl_format_from_internal(GLenum internal_format)
+{
+	switch (internal_format) {
+	case GL_R8_EXT:
+		return GL_RED_EXT;
+	case GL_RG8_EXT:
+		return GL_RG_EXT;
+	default:
+		return internal_format;
+	}
+}
+
 static void repaint_region(struct clv_view *view, struct clv_region *region,
-			   struct clv_region *surf_region)
+			   struct clv_region *surf_region,
+			   struct clv_pos *pos)
 {
 	struct clv_compositor *c = view->surface->c;
 	struct gl_display *disp = get_display(c);
@@ -839,11 +1283,10 @@ static void repaint_region(struct clv_view *view, struct clv_region *region,
 	u32 *vtxcnt;
 	s32 i, first, nfans;
 
-	nfans = texture_region(view, region, surf_region);
+	nfans = texture_region(view, region, surf_region, pos);
 
 	v = disp->vertices.data;
 	vtxcnt = disp->vtxcnt.data;
-
 	/* position: */
 	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(*v), &v[0]);
 	glEnableVertexAttribArray(0);
@@ -853,6 +1296,7 @@ static void repaint_region(struct clv_view *view, struct clv_region *region,
 	glEnableVertexAttribArray(1);
 
 	for (i = 0, first = 0; i < nfans; i++) {
+		gles_debug("draw TRIANGLE_FAN: %d, %d", first, vtxcnt[i]);
 		glDrawArrays(GL_TRIANGLE_FAN, first, vtxcnt[i]);
 		first += vtxcnt[i];
 	}
@@ -872,12 +1316,20 @@ static void draw_view(struct clv_view *v, struct clv_output *output,
 	struct gl_surface_state *gs = get_surface_state(v->surface);
 	struct clv_region surface_opaque, surface_blend;
 	struct clv_region view_area, output_area;
+	struct clv_box *boxes;
 	GLint filter;
-	s32 i;
-	
+	s32 i, n;
+
 	if (!gs->shader)
 		return;
 
+	gles_debug("damage area left:");
+	boxes = clv_region_boxes(damage, &n);
+	for (i = 0; i < n; i++) {
+		gles_debug("(%u, %u) (%u, %u)", boxes[i].p1.x, boxes[i].p1.y,
+			   boxes[i].p2.x, boxes[i].p2.y);
+	}
+	
 	clv_region_init_rect(&view_area, v->area.pos.x, v->area.pos.y,
 			     v->area.w, v->area.h);
 	clv_region_init_rect(&output_area, output->render_area.pos.x,
@@ -891,7 +1343,21 @@ static void draw_view(struct clv_view *v, struct clv_output *output,
 
 	clv_region_translate(&view_area, -output->render_area.pos.x,
 			     -output->render_area.pos.y);
+	clv_region_intersect(&view_area, &view_area, damage);
+	gles_debug("view_area to repaint:");
+	boxes = clv_region_boxes(&view_area, &n);
+	for (i = 0; i < n; i++) {
+		gles_debug("(%u, %u) (%u, %u)", boxes[i].p1.x, boxes[i].p1.y,
+			   boxes[i].p2.x, boxes[i].p2.y);
+	}
 	clv_region_subtract(damage, damage, &view_area);
+
+	gles_debug("damage area left:");
+	boxes = clv_region_boxes(damage, &n);
+	for (i = 0; i < n; i++) {
+		gles_debug("(%u, %u) (%u, %u)", boxes[i].p1.x, boxes[i].p1.y,
+			   boxes[i].p2.x, boxes[i].p2.y);
+	}
 
 	glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
 
@@ -899,7 +1365,6 @@ static void draw_view(struct clv_view *v, struct clv_output *output,
 	shader_uniforms(gs->shader, v, output);
 
 	filter = GL_LINEAR; /* GL_NEAREST */
-
 	for (i = 0; i < gs->count_textures; i++) {
 		glActiveTexture(GL_TEXTURE0 + i);
 		glBindTexture(gs->target, gs->textures[i]);
@@ -922,13 +1387,15 @@ static void draw_view(struct clv_view *v, struct clv_output *output,
 			glEnable(GL_BLEND);
 		else
 			glDisable(GL_BLEND);
-		repaint_region(v, &view_area, &surface_opaque);
+		repaint_region(v, &view_area, &surface_opaque,
+			       &output->render_area.pos);
 	}
 
 	if (clv_region_is_not_empty(&surface_blend)) {
 		use_shader(disp, gs->shader);
 		glEnable(GL_BLEND);
-		repaint_region(v, &view_area, &surface_blend);
+		repaint_region(v, &view_area, &surface_blend,
+			       &output->render_area.pos);
 	}
 
 	clv_region_fini(&surface_blend);
@@ -945,10 +1412,8 @@ static void repaint_views(struct clv_output *output, struct clv_region *damage)
 	struct clv_view *view;
 
 	list_for_each_entry_reverse(view, &c->views, link) {
-		/* TODO do not draw cursor view and overlay view */
-		if (view->dirty) {
+		if (view->type == CLV_VIEW_TYPE_PRIMARY) {
 			draw_view(view, output, damage);
-			view->dirty = 0;
 		}
 	}
 }
@@ -972,23 +1437,12 @@ static void gl_repaint_output(struct clv_output *output)
 	repaint_views(output, &total_damage);
 	clv_region_fini(&total_damage);
 	/* TODO send frame signal */
+	egl_debug("EGL Swap buffer.");
 	ret = eglSwapBuffers(disp->egl_display, go->egl_surface);
 	if (ret == EGL_FALSE && !errored) {
 		errored = 1;
-		clv_err("Failed to call eglSwapBuffers.");
+		egl_err("Failed to call eglSwapBuffers.");
 		egl_error_state();
-	}
-}
-
-static GLenum gl_format_from_internal(GLenum internal_format)
-{
-	switch (internal_format) {
-	case GL_R8_EXT:
-		return GL_RED_EXT;
-	case GL_RG8_EXT:
-		return GL_RG_EXT;
-	default:
-		return internal_format;
 	}
 }
 
@@ -998,7 +1452,7 @@ static void gl_flush_damage(struct clv_surface *surface)
 	struct gl_surface_state *gs = get_surface_state(surface);
 	struct clv_buffer *buffer = gs->buffer;
 	struct clv_box *boxes, *box;
-	struct gl_shm_buffer *shm_buffer;
+	struct shm_buffer *shm_buffer;
 	u8 *data;
 	s32 i, j, count_boxes;
 
@@ -1012,12 +1466,10 @@ static void gl_flush_damage(struct clv_surface *surface)
 		&& !gs->needs_full_upload)
 		goto done;
 
-	if (surface->view)
-		surface->view->dirty = 1; /* need to re-composite */
-
-	shm_buffer = container_of(buffer, struct gl_shm_buffer, base);
+	shm_buffer = container_of(buffer, struct shm_buffer, base);
 	data = shm_buffer->shm.map;
 	assert(data);
+
 	if (!disp->support_unpack_subimage) {
 		/* begin access buffer */
 		for (j = 0; j < gs->count_textures; j++) {
@@ -1087,12 +1539,30 @@ done:
 	gs->needs_full_upload = 0;
 }
 
+static void dmabuf_destroy(struct dma_buffer *buffer)
+{
+	struct gl_display *disp = buffer->disp;
+
+	if (!buffer)
+		return;
+
+	if (buffer->image != EGL_NO_IMAGE_KHR) {
+		disp->destroy_image(disp->egl_display, buffer->image);
+		buffer->image = EGL_NO_IMAGE_KHR;
+	}
+	list_del(&buffer->link);
+	free(buffer);
+}
+
 static void gl_display_destroy(struct clv_compositor *c)
 {
 	struct gl_display *disp = get_display(c);
+	struct dma_buffer *buffer, *t;
 
 	eglMakeCurrent(disp->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
 		       EGL_NO_CONTEXT);
+	list_for_each_entry_safe(buffer, t, &disp->dmabuf_images, link)
+		dmabuf_destroy(buffer);
 	if (disp->dummy_surface != EGL_NO_SURFACE)
 		eglDestroySurface(disp->egl_display, disp->dummy_surface);
 	eglTerminate(disp->egl_display);
@@ -1117,22 +1587,23 @@ static s32 gl_output_state_create(struct clv_output *output,
 }
 
 static EGLSurface gl_create_output_surface(struct gl_display *disp,
-					   EGLNativeWindowType legacy_win,
+					   void *legacy_win,
 					   void *window,
 					   s32 *formats,
-					   s32 count_fmts)
+					   s32 count_fmts,
+					   s32 *vid)
 {
 	EGLSurface egl_surface;
 	EGLConfig egl_config;
 
 	if (egl_choose_config(disp, gl_opaque_attribs, formats, count_fmts,
-			      &egl_config) < 0) {
-		clv_err("failed to choose EGL config for output");
+			      &egl_config, vid) < 0) {
+		egl_err("failed to choose EGL config for output");
 		return EGL_NO_SURFACE;
 	}
 
 	if (egl_config != disp->egl_config) {
-		clv_err("attempt to use different config for output.");
+		egl_err("attempt to use different config for output.");
 		return EGL_NO_SURFACE;
 	}
 
@@ -1142,11 +1613,13 @@ static EGLSurface gl_create_output_surface(struct gl_display *disp,
 							   window,
 							   NULL);
 	} else if (legacy_win) {
-		egl_surface = eglCreateWindowSurface(disp->egl_display,
-						     egl_config,
-						     legacy_win, NULL);
+		egl_surface = eglCreateWindowSurface(
+					disp->egl_display,
+					egl_config,
+					(EGLNativeWindowType)legacy_win,
+					NULL);
 	} else {
-		clv_err("create_platform_window = %p, window = %p, "
+		egl_err("create_platform_window = %p, window = %p, "
 			"legacy_win = %lu", disp->create_platform_window,
 			window, (u64)legacy_win);
 		return EGL_NO_SURFACE;
@@ -1156,10 +1629,11 @@ static EGLSurface gl_create_output_surface(struct gl_display *disp,
 }
 
 static s32 gl_output_create(struct clv_output *output,
-			    EGLNativeWindowType window_for_legacy,
+			    void *window_for_legacy,
 			    void *window,
 			    s32 *formats,
-			    s32 count_fmts)
+			    s32 count_fmts,
+			    s32 *vid)
 {
 	struct clv_compositor *c = output->c;
 	struct gl_display *disp = get_display(c);
@@ -1167,9 +1641,10 @@ static s32 gl_output_create(struct clv_output *output,
 	s32 ret;
 
 	egl_surface = gl_create_output_surface(disp, window_for_legacy,
-					       window, formats, count_fmts);
+					       window, formats, count_fmts,
+					       vid);
 	if (egl_surface == EGL_NO_SURFACE) {
-		clv_err("failed to create output surface.");
+		egl_err("failed to create output surface.");
 		return -1;
 	}
 
@@ -1191,12 +1666,82 @@ static void gl_output_destroy(struct clv_output *output)
 	free(go);
 }
 
-s32 gl_display_create(struct clv_compositor *c, s32 *formats, s32 count_fmts,
-		      s32 no_winsys, void *native_window)
+static struct clv_buffer *gl_import_dmabuf(struct clv_compositor *c,
+					   s32 fd, u32 w, u32 h,
+					   u32 stride,
+					   enum clv_pixel_fmt pixel_fmt,
+					   u32 internal_fmt)
+{
+	struct gl_display *disp = get_display(c);
+	struct dma_buffer *dma_buf = NULL;
+	EGLint attribs[50] = {0};
+	s32 attrib = 0;
+
+	printf("fd = %d\n", fd);
+	if (!disp->support_dmabuf_import) {
+		clv_err("cannot support dmabuf import feature.");
+		return NULL;
+	}
+
+	if (pixel_fmt != CLV_PIXEL_FMT_ARGB8888
+	    && pixel_fmt != CLV_PIXEL_FMT_ARGB8888) {
+		clv_err("cannot support pixel fmt %u", pixel_fmt);
+		return NULL;
+	}
+
+	dma_buf = calloc(1, sizeof(*dma_buf));
+	if (!dma_buf)
+		return NULL;
+
+	dma_buf->base.type = CLV_BUF_TYPE_DMA;
+	dma_buf->base.w = w;
+	dma_buf->base.h = h;
+	dma_buf->base.stride = stride;
+	dma_buf->base.pixel_fmt = pixel_fmt;
+	dma_buf->base.count_planes = 1;
+	dma_buf->base.fd = fd;
+
+	attribs[attrib++] = EGL_WIDTH;
+	attribs[attrib++] = w;
+	attribs[attrib++] = EGL_HEIGHT;
+	attribs[attrib++] = h;
+	attribs[attrib++] = EGL_LINUX_DRM_FOURCC_EXT;
+	attribs[attrib++] = internal_fmt;
+	attribs[attrib++] = EGL_DMA_BUF_PLANE0_FD_EXT;
+	attribs[attrib++] = fd;
+	attribs[attrib++] = EGL_DMA_BUF_PLANE0_OFFSET_EXT;
+	attribs[attrib++] = 0;
+	attribs[attrib++] = EGL_DMA_BUF_PLANE0_PITCH_EXT;
+	attribs[attrib++] = stride;
+	attribs[attrib++] = EGL_NONE;
+	printf("w = %u h = %u fd = %d pixel_fmt = %u stride = %u\n",
+		w, h, fd, pixel_fmt, stride);
+	dma_buf->image = disp->create_image(disp->egl_display,
+					    EGL_NO_CONTEXT,
+					    EGL_LINUX_DMA_BUF_EXT,
+					    NULL, attribs);
+	if (dma_buf->image == EGL_NO_IMAGE_KHR) {
+		gles_err("cannot create EGL image by DMABUF");
+		egl_error_state();
+		free(dma_buf);
+		return NULL;
+	}
+
+	dma_buf->disp = disp;
+
+	list_add_tail(&dma_buf->link, &disp->dmabuf_images);
+
+	return &dma_buf->base;
+}
+
+s32 renderer_create(struct clv_compositor *c, s32 *formats, s32 count_fmts,
+		    s32 no_winsys, void *native_window, s32 *vid)
 {
 	struct gl_display *disp;
 	EGLint major, minor;
 
+	gles_dbg = 15;
+	egl_dbg = 15;
 	disp = calloc(1, sizeof(*disp));
 	if (!disp)
 		return -ENOMEM;
@@ -1218,37 +1763,38 @@ s32 gl_display_create(struct clv_compositor *c, s32 *formats, s32 count_fmts,
 	}
 
 	if (disp->egl_display == EGL_NO_DISPLAY) {
-		clv_err("failed to create EGL display.");
+		egl_err("failed to create EGL display.");
 		goto err1;
 	}
 
 	if (!eglInitialize(disp->egl_display, &major, &minor)) {
-		clv_err("failed to initialize EGL.");
+		egl_err("failed to initialize EGL.");
 		goto err3;
 	}
 
-	egl_info(disp->egl_display);
+	print_egl_info(disp->egl_display);
 
 	if (egl_choose_config(disp, gl_opaque_attribs, formats, count_fmts,
-			      &disp->egl_config) < 0) {
-		clv_err("failed to choose EGL config");
+			      &disp->egl_config, vid) < 0) {
+		egl_err("failed to choose EGL config");
 		goto err2;
 	}
 
 	if (set_egl_extensions(disp) < 0) {
-		clv_err("failed to set EGL extensions.");
+		egl_err("failed to set EGL extensions.");
 		goto err3;
 	}
 
 	if (disp->support_surfaceless_context) {
 		disp->dummy_surface = EGL_NO_SURFACE;
 	} else {
-		clv_info("EGL_KHR_surfaceless_context unavailable. "
+		egl_info("EGL_KHR_surfaceless_context unavailable. "
 			 "Tring PbufferSurface");
 		if (create_pbuffer_surface(disp) < 0)
 			goto err3;
 	}
 
+	c->renderer = &disp->base;
 	if (gl_setup(c, disp->dummy_surface) < 0)
 		goto err3;
 
@@ -1257,14 +1803,18 @@ s32 gl_display_create(struct clv_compositor *c, s32 *formats, s32 count_fmts,
 
 	clv_signal_init(&disp->destroy_signal);
 
+	INIT_LIST_HEAD(&disp->dmabuf_images);
+
 	disp->base.repaint_output = gl_repaint_output;
 	disp->base.flush_damage = gl_flush_damage;
 	disp->base.attach_buffer = gl_attach_buffer;
 	disp->base.output_create = gl_output_create;
 	disp->base.output_destroy = gl_output_destroy;
 	disp->base.destroy = gl_display_destroy;
+	disp->base.import_dmabuf = gl_import_dmabuf;
 
-	c->renderer = &disp->base;
+	gles_dbg = 0;
+	egl_dbg = 0;
 
 	return 0;
 
@@ -1275,5 +1825,11 @@ err2:
 err1:
 	free(disp);
 	return -1;
+}
+
+void set_renderer_dbg(u8 flag)
+{
+	gles_dbg = flag & 0x0F;
+	egl_dbg = (flag & 0xF0) >> 4;
 }
 
