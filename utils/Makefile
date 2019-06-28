@@ -8,6 +8,8 @@ OBJ := libclover_utils.so
 CFLAGS += -I$(RPATH)/utils
 CFLAGS += -fPIC
 
+LDFLAGS += -lrt
+
 CLOVER_UTILS_H += clover_utils.h
 CLOVER_UTILS_H += clover_log.h
 CLOVER_UTILS_H += clover_array.h

@@ -21,54 +21,54 @@ static u8 egl_dbg = 0;
 
 #define gles_debug(fmt, ...) do { \
 	if (gles_dbg >= 3) { \
-		clv_debug("[GLES]" fmt, ##__VA_ARGS__); \
+		clv_debug("[GLES] " fmt, ##__VA_ARGS__); \
 	} \
 } while (0);
 
 #define gles_info(fmt, ...) do { \
 	if (gles_dbg >= 2) { \
-		clv_info("[GLES]" fmt, ##__VA_ARGS__); \
+		clv_info("[GLES] " fmt, ##__VA_ARGS__); \
 	} \
 } while (0);
 
 #define gles_notice(fmt, ...) do { \
 	if (gles_dbg >= 1) { \
-		clv_notice("[GLES]" fmt, ##__VA_ARGS__); \
+		clv_notice("[GLES] " fmt, ##__VA_ARGS__); \
 	} \
 } while (0);
 
 #define gles_warn(fmt, ...) do { \
-	clv_warn("[GLES]" fmt, ##__VA_ARGS__); \
+	clv_warn("[GLES] " fmt, ##__VA_ARGS__); \
 } while (0);
 
 #define gles_err(fmt, ...) do { \
-	clv_err("[GLES]" fmt, ##__VA_ARGS__); \
+	clv_err("[GLES] " fmt, ##__VA_ARGS__); \
 } while (0);
 
 #define egl_debug(fmt, ...) do { \
 	if (egl_dbg >= 3) { \
-		clv_debug("[EGL ]" fmt, ##__VA_ARGS__); \
+		clv_debug("[EGL ] " fmt, ##__VA_ARGS__); \
 	} \
 } while (0);
 
 #define egl_info(fmt, ...) do { \
 	if (egl_dbg >= 2) { \
-		clv_info("[EGL ]" fmt, ##__VA_ARGS__); \
+		clv_info("[EGL ] " fmt, ##__VA_ARGS__); \
 	} \
 } while (0);
 
 #define egl_notice(fmt, ...) do { \
 	if (egl_dbg >= 1) { \
-		clv_notice("[EGL ]" fmt, ##__VA_ARGS__); \
+		clv_notice("[EGL ] " fmt, ##__VA_ARGS__); \
 	} \
 } while (0);
 
 #define egl_warn(fmt, ...) do { \
-	clv_warn("[EGL ]" fmt, ##__VA_ARGS__); \
+	clv_warn("[EGL ] " fmt, ##__VA_ARGS__); \
 } while (0);
 
 #define egl_err(fmt, ...) do { \
-	clv_err("[EGL ]" fmt, ##__VA_ARGS__); \
+	clv_err("[EGL ] " fmt, ##__VA_ARGS__); \
 } while (0);
 
 static const char vertex_shader[] =
@@ -1573,7 +1573,7 @@ static void gl_display_destroy(struct clv_compositor *c)
 }
 
 static s32 gl_output_state_create(struct clv_output *output,
-				   EGLSurface surface)
+				  EGLSurface surface)
 {
 	struct gl_output_state *go;
 
@@ -1734,8 +1734,8 @@ static struct clv_buffer *gl_import_dmabuf(struct clv_compositor *c,
 	return &dma_buf->base;
 }
 
-s32 renderer_create(struct clv_compositor *c, s32 *formats, s32 count_fmts,
-		    s32 no_winsys, void *native_window, s32 *vid)
+s32 gl_renderer_create(struct clv_compositor *c, s32 *formats, s32 count_fmts,
+		       s32 no_winsys, void *native_window, s32 *vid)
 {
 	struct gl_display *disp;
 	EGLint major, minor;
@@ -1827,7 +1827,7 @@ err1:
 	return -1;
 }
 
-void set_renderer_dbg(u8 flag)
+void gl_set_renderer_dbg(u8 flag)
 {
 	gles_dbg = flag & 0x0F;
 	egl_dbg = (flag & 0xF0) >> 4;

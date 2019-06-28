@@ -1068,7 +1068,7 @@ bail:
 }
 
 s32 clv_region_init_boxes(struct clv_region *region,
-			     const struct clv_box *boxes, s32 count)
+			  const struct clv_box *boxes, s32 count)
 {
 	struct clv_box *inner_boxes, *box;
 	s32 skip, i;
@@ -1436,8 +1436,7 @@ s32 clv_region_is_not_empty(struct clv_region *region)
 	return (!REGION_NIL(region));
 }
 
-struct clv_box * clv_region_boxes(struct clv_region *region,
-					s32 *count_boxes)
+struct clv_box * clv_region_boxes(struct clv_region *region, s32 *count_boxes)
 {
 	if (count_boxes)
 		*count_boxes = REGION_COUNT_BOXES(region);

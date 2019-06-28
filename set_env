@@ -1,0 +1,5 @@
+#!/bin/sh
+
+PWD=`pwd`
+export LD_LIBRARY_PATH=${PWD}/server/compositor:${PWD}/server/compositor/drm_backend:${PWD}/server/renderer:${PWD}/server/renderer/gl_renderer:${PWD}/utils
+
