@@ -1,7 +1,7 @@
 #include <stdlib.h>
 #include <dlfcn.h>
 #include <clover_utils.h>
-#include <compositor.h>
+#include <clover_compositor.h>
 
 #define LIB_NAME "libclover_gl_renderer.so"
 

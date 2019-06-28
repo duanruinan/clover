@@ -28,7 +28,7 @@ CLOVER_UTILS_H += $(RPATH)/utils/clover_ipc.h
 
 all: $(OBJ)
 
-gl_renderer.o: gl_renderer.c $(RPATH)/server/compositor/compositor.h \
+gl_renderer.o: gl_renderer.c $(RPATH)/server/compositor/clover_compositor.h \
 		$(CLOVER_UTILS_H)
 	$(CC) -c $< $(CFLAGS) -o $@
 

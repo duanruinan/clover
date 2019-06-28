@@ -3,7 +3,7 @@ include $(RPATH)/build/build_env
 .PHONY: all
 .PHONY: clean
 
-OBJ := libclover_drm_backend.so test_drm_backend
+OBJ := libclover_drm_backend.so
 
 CFLAGS += -I$(RPATH)/utils
 CFLAGS += -I$(RPATH)/server/compositor
@@ -26,7 +26,6 @@ all: $(OBJ)
 clean:
 	-@rm -f libclover_drm_backend.so
 	-@rm -f *.o
-	-@rm -f test_drm_backend
 
 libclover_drm_backend.so: drm_backend.o
 	$(CC) -shared -rdynamic $^ $(LDFLAGS) $(PLATFORM_LDFLAGS) \
@@ -34,18 +33,7 @@ libclover_drm_backend.so: drm_backend.o
 		-L$(RPATH)/server/compositor -lclover_compositor -o $@
 
 drm_backend.o: drm_backend.c \
-		$(CLOVER_UTILS_H) $(RPATH)/server/compositor/compositor.h
+		$(CLOVER_UTILS_H) $(RPATH)/server/compositor/clover_compositor.h
 	$(CC) -c $< $(PLATFORM_CFLAGS) $(CFLAGS) -o $@
 
-test_drm_backend: test_drm_backend.o libclover_drm_backend.so
-	$(CC) $< $(LDFLAGS) \
-		-L$(RPATH)/server/compositor/drm_backend -lclover_drm_backend \
-		-L$(RPATH)/utils -lclover_utils \
-		-L$(RPATH)/server/renderer -lclover_renderer \
-		-L$(RPATH)/server/compositor -lclover_compositor \
-		-o $@
-
-test_drm_backend.o: test_drm_backend.c \
-		$(CLOVER_UTILS_H) $(RPATH)/server/compositor/compositor.h
-	$(CC) -c $< $(PLATFORM_CFLAGS) $(CFLAGS) -o $@
 

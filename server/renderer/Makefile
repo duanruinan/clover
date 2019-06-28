@@ -23,12 +23,12 @@ libclover_renderer.so: renderer.o
 	$(CC) -shared $^ $(LDFLAGS) -ldl -o $@
 
 renderer.o: renderer.c \
-		$(RPATH)/server/compositor/compositor.h \
+		$(RPATH)/server/compositor/clover_compositor.h \
 		$(CLOVER_UTILS_H)
 	$(CC) -c $< $(CFLAGS) -o $@
 
 main-clean:
-	-@rm -f renderer.o
+	-@rm -f *.o
 	-@rm -f libclover_renderer.so
 
 gl-backend:

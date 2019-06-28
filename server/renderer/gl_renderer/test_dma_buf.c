@@ -21,7 +21,7 @@
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
 #include <GLES2/gl2ext.h>
-#include <compositor.h>
+#include <clover_compositor.h>
 #include <clover_utils.h>
 #include <clover_region.h>
 #include <clover_ipc.h>

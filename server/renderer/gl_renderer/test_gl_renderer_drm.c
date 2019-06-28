@@ -12,7 +12,7 @@
 #include <drm_fourcc.h>
 #include <clover_utils.h>
 #include <clover_log.h>
-#include <compositor.h>
+#include <clover_compositor.h>
 #include <clover_region.h>
 
 struct drm_fb {

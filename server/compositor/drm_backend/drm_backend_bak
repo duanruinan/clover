@@ -36,7 +36,7 @@
 #include <clover_event.h>
 #include <clover_log.h>
 #include <clover_region.h>
-#include <clover_compositor.h>
+#include <compositor.h>
 
 static u8 drm_dbg = 16;
 static u8 gbm_dbg = 16;
@@ -277,9 +277,10 @@ struct drm_backend {
 
 	struct clv_event_loop *loop;
 
+	enum clv_desktop_mode mode;
 	struct clv_region canvas;
 
-	char dev_node[128];
+	char dev_node[DEV_NODE_LEN];
 	s32 drm_fd;
 
 	u32 cursor_w, cursor_h;
@@ -1892,7 +1893,6 @@ struct clv_backend *drm_backend_create(struct clv_compositor *c,
 				       struct clv_compositor_config *config)
 {
 	struct drm_backend *b;
-	char *dev_node;
 
 	renderer = c->renderer;
 
@@ -1904,17 +1904,14 @@ struct clv_backend *drm_backend_create(struct clv_compositor *c,
 
 	b->c = c;
 
+	b->mode = config->mode;
 	clv_region_init(&b->canvas);
+	clv_region_copy(&b->canvas, &config->canvas);
 
-	dev_node = getenv("CLOVER_DEV_NODE");
-	if (dev_node)
-		strcpy(b->dev_node, dev_node);
-	else
-		strcpy(b->dev_node, "/dev/dri/card0");
-	
-	b->drm_fd = open(b->dev_node, O_RDWR | O_CLOEXEC, 0644);
+	strcpy(b->dev_node, config->dev_node);
+	b->drm_fd = open(config->dev_node, O_RDWR | O_CLOEXEC, 0644);
 	if (b->drm_fd < 0) {
-		drm_err("failed to open %s. %s", b->dev_node,
+		drm_err("failed to open %s. %s", config->dev_node,
 			strerror(errno));
 		goto error;
 	}
@@ -1924,7 +1921,7 @@ struct clv_backend *drm_backend_create(struct clv_compositor *c,
 		goto error;
 	}
 	/* set clock type */
-	c->clock_type = b->clk_id;
+	c->presentation_clock = b->clk_id;
 
 	b->res = drmModeGetResources(b->drm_fd);
 	if (!b->res) {

@@ -14,7 +14,7 @@
 #include <clover_region.h>
 #include <clover_shm.h>
 #include <clover_signal.h>
-#include <compositor.h>
+#include <clover_compositor.h>
 
 static u8 gles_dbg = 0;
 static u8 egl_dbg = 0;

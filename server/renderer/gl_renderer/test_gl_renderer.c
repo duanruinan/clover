@@ -13,7 +13,7 @@
 #endif
 #include <EGL/egl.h>
 #include <clover_utils.h>
-#include <compositor.h>
+#include <clover_compositor.h>
 
 //#define USE_RGB_BG 1
 #define USE_YUV420_BG 1

@@ -1,5 +1,24 @@
-#ifndef COMPOSITOR_H
-#define COMPOSITOR_H
+/*
+ * Copyright (C) 2019 Ruinan Duan, duanruinan@zoho.com 
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version 2
+ * of the License, or (at your option) any later version.
+ * 
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ * 
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
+ * MA  02110-1301, USA.
+ */
+
+#ifndef CLOVER_COMPOSITOR_H
+#define CLOVER_COMPOSITOR_H
 
 #include <time.h>
 #include <assert.h>
@@ -12,24 +31,22 @@ struct clv_renderer;
 struct clv_surface;
 struct clv_view;
 struct clv_backend;
-struct clv_compositor_config;
 struct clv_output;
 struct clv_head;
 struct clv_plane;
 struct clv_server;
 
-struct clv_server {
+struct clv_display {
 	struct clv_event_loop *loop;
-	struct clv_compositor *c;
 	s32 exit;
 	struct list_head clients;
 };
 
-struct clv_event_loop *clv_server_get_event_loop(struct clv_server *server);
-struct clv_server *clv_server_create(void);
-void clv_server_run(struct clv_server *server);
-void clv_server_stop(struct clv_server *server);
-void clv_server_destroy(struct clv_server *server);
+struct clv_event_loop *clv_display_get_event_loop(struct clv_display *display);
+struct clv_display *clv_display_create(void);
+void clv_display_run(struct clv_display *display);
+void clv_display_stop(struct clv_display *display);
+void clv_display_destroy(struct clv_display *display);
 
 struct clv_plane {
 	struct clv_compositor *c;
@@ -38,41 +55,76 @@ struct clv_plane {
 };
 
 struct clv_compositor {
-	struct clv_server *server;
+	struct clv_display *display;
+
 	struct clv_backend *backend;
+
 	struct clv_renderer *renderer;
+
 	struct clv_plane root_plane;
 	struct list_head views;
 	struct list_head outputs;
 	struct list_head pending_outputs;
 	struct list_head heads;
 	struct list_head planes;
-	clockid_t presentation_clock;
+	clockid_t clock_type;
+
+	/* compositor signals */
+	struct clv_signal destroy_signal;
+
+	/* output signals */
+	struct clv_signal output_created_signal;
+	struct clv_signal output_destroyed_signal;
+	struct clv_signal output_resized_signal;
+
+	/* head change signals */
+	struct clv_signal head_changed_signal;
+	struct clv_event_source head_changed_source;
+
+	/* repaint */
+	struct clv_event_source repaint_timer_source;
 };
 
-enum clv_desktop_mode {
-	CLV_DESKTOP_MODE_UNKNOWN = 0,
-	CLV_DESKTOP_MODE_DUPLICATED,
-	CLV_DESKTOP_MODE_EXTENDED,
-};
-
-#define DEV_NODE_LEN 128
-
-struct clv_compositor_config {
-	char dev_node[DEV_NODE_LEN];
-	enum clv_desktop_mode mode;
-	struct clv_region canvas;
-};
+struct clv_compositor *clv_compositor_create(struct clv_display *display);
 
 struct clv_backend {
 	void (*destroy)(struct clv_compositor *c);
+
+	/*
+	 * Begin a repaint sequence
+	 *
+	 * alloc new pending state (repaint_data)
+	 *
+	 * The repaint cycle is luanched by compositor's repaint_time_source.
+	 *
+	 * The timer is shared by different outputs.
+	 * The timer is reloaded at the end of the timer procedure.
+	 * The timer is reloaded at the page flip handler.
+	 *     The timestamp of the last frame is produced by page flip handler.
+	 *     Use this time stamp and the frame period which is produced by the
+	 *     LCDC timing to get the time of the next frame.
+	 * Condition: Check each output's state, if no repainting request
+	 *            is scheduled, do nothing.
+	 */
 	void * (*repaint_begin)(struct clv_compositor *c);
-	void (*repaint_cancel)(struct clv_compositor *c, void *repaint_data);
+
+	/*
+	 * Conclude a repaint sequence
+	 *
+	 * apply pending state (e.g. KMS's Atomic submit)\
+	 */
 	void (*repaint_flush)(struct clv_compositor *c, void *repaint_data);
+
+	/*
+	 * Cancel a repaint sequence
+	 *
+	 * free pending state (repaint data)
+	 */
+	void (*repaint_cancel)(struct clv_compositor *c, void *repaint_data);
+
+	/* establish a display path (GLES context + LCDC + Head) */
 	struct clv_output * (*output_create)(struct clv_compositor *c,
 					     u32 head_index);
-	void (*update_config)(struct clv_compositor *c,
-			      struct clv_compositor_config *config);
 };
 
 void set_backend_dbg(u8 flag);
@@ -237,31 +289,6 @@ s32 renderer_create(struct clv_compositor *c, s32 *formats, s32 count_fmts,
 
 void set_renderer_dbg(u8 flag);
 
-#define NSEC_PER_SEC 1000000000
-
-/* Subtract timespecs
- *
- * \param r[out] result: a - b
- * \param a[in] operand
- * \param b[in] operand
- */
-static inline void timespec_sub(struct timespec *r,
-				const struct timespec *a,
-				const struct timespec *b)
-{
-	r->tv_sec = a->tv_sec - b->tv_sec;
-	r->tv_nsec = a->tv_nsec - b->tv_nsec;
-	if (r->tv_nsec < 0) {
-		r->tv_sec--;
-		r->tv_nsec += NSEC_PER_SEC;
-	}
-}
-
-static inline s64 millihz_to_nsec(u32 mhz)
-{
-	assert(mhz > 0);
-	return 1000000000000LL / mhz;
-}
 
 #endif
 

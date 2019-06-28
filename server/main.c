@@ -1,3 +1,22 @@
+/*
+ * Copyright (C) 2019 Ruinan Duan, duanruinan@zoho.com 
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version 2
+ * of the License, or (at your option) any later version.
+ * 
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ * 
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
+ * MA  02110-1301, USA.
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,7 +32,7 @@
 #include <clover_utils.h>
 #include <clover_log.h>
 #include <clover_event.h>
-#include <compositor.h>
+#include <clover_compositor.h>
 
 s32 run_as_daemon = 0;
 char drm_node[] = "/dev/dri/card0";
@@ -68,21 +87,20 @@ static void run_daemon(void)
 	umask(0);
 
 	signal(SIGCHLD, SIG_IGN);
-	clv_info("Clover server running ...");
 }
 
 static s32 signal_event_proc(s32 signal_number, void *data)
 {
-	void *server = data;
+	void *display = data;
 
 	switch (signal_number) {
 	case SIGINT:
 		clv_info("Receive SIGINT, exit.");
-		clv_server_stop(server);
+		clv_display_stop(display);
 		break;
 	case SIGTERM:
 		clv_info("Receive SIGTERM, exit.");
-		clv_server_stop(server);
+		clv_display_stop(display);
 		break;
 	default:
 		clv_err("Receive unknown signal %d", signal_number);
@@ -95,7 +113,7 @@ static s32 signal_event_proc(s32 signal_number, void *data)
 s32 main(s32 argc, char **argv)
 {
 	s32 ch;
-	void *server;
+	void *display;
 	struct clv_event_loop *loop;
 	struct clv_event_source *sig_int_source, *sig_tem_source;
 	
@@ -120,29 +138,29 @@ s32 main(s32 argc, char **argv)
 	if (run_as_daemon)
 		run_daemon();
 
-	server = clv_server_create();
-	if (!server) {
-		clv_err("cannot create clover server.");
+	display = clv_display_create();
+	if (!display) {
+		clv_err("cannot create clover display.");
 		return -1;
 	}
 
-	loop = clv_server_get_event_loop(server);
+	loop = clv_display_get_event_loop(display);
 	assert(loop);
 
 	sig_int_source = clv_event_loop_add_signal(loop, SIGINT,
 						   signal_event_proc,
-						   server);
+						   display);
 
 	sig_tem_source = clv_event_loop_add_signal(loop, SIGTERM,
 						   signal_event_proc,
-						   server);
+						   display);
 
-	clv_server_run(server);
+	clv_display_run(display);
 
 	clv_event_source_remove(sig_int_source);
 	clv_event_source_remove(sig_tem_source);
 	
-	clv_server_destroy(server);
+	clv_display_destroy(display);
 	
 
 	return 0;

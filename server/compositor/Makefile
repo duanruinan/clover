@@ -39,15 +39,15 @@ drm-backend-clean:
 
 main: libclover_compositor.so
 
-libclover_compositor.so: compositor.o
+libclover_compositor.so: clover_compositor.o
 	$(CC) -shared $^ $(LDFLAGS) -ldl -o $@
 
-compositor.o: compositor.c \
-		$(RPATH)/server/compositor/compositor.h \
+clover_compositor.o: clover_compositor.c \
+		$(RPATH)/server/compositor/clover_compositor.h \
 		$(CLOVER_UTILS_H)
 	$(CC) -c $< $(CFLAGS) -o $@
 
 main-clean:
-	-@rm -f compositor.o
+	-@rm -f *.o
 	-@rm -f libclover_compositor.so
 
