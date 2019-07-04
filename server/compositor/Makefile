@@ -39,7 +39,11 @@ drm-backend-clean:
 
 main: libclover_compositor.so
 
-libclover_compositor.so: clover_compositor.o
+clover_config.o: clover_config.c \
+		$(RPATH)/server/compositor/clover_compositor.h
+	$(CC) -c $< $(CFLAGS) -o $@
+
+libclover_compositor.so: clover_compositor.o clover_config.o
 	$(CC) -shared $^ $(LDFLAGS) -ldl -o $@
 
 clover_compositor.o: clover_compositor.c \
