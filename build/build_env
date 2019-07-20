@@ -15,6 +15,6 @@ CFLAGS += -Wall
 ifeq ($(CLV_DEBUG), Y)
 CFLAGS += -g -DDEBUG
 else
-CFLAGS += -DNDEBUG
+# CFLAGS += -DNDEBUG
 endif
 
