@@ -159,6 +159,86 @@ struct drm_plane {
 	},
 };
 
+void create_dumb_nv24(s32 fd, u32 width, u32 height, u32 *fb_id, unsigned char **map_y, unsigned char **map_uv)
+{
+	struct drm_mode_create_dumb create_arg_y, create_arg_uv;
+	struct drm_mode_destroy_dumb destroy_arg;
+	struct drm_mode_map_dumb map_arg_y, map_arg_uv;
+	u32 handles[4] = {0, 0, 0, 0}, strides[4] = {0, 0, 0, 0}, offsets[4] = {0, 0, 0, 0};
+	u32 size;
+	s32 ret;
+	void *map;
+
+	memset(&create_arg_y, 0, sizeof create_arg_y);
+	create_arg_y.bpp = 8;
+	create_arg_y.width = width;
+	create_arg_y.height = height;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &create_arg_y);
+	if (ret)
+		printf("failed to create y dumb\n");
+	else
+		printf("create y dumb ok\n");
+
+	memset(&create_arg_uv, 0, sizeof create_arg_uv);
+	create_arg_uv.bpp = 16;
+	create_arg_uv.width = width;
+	create_arg_uv.height = height;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &create_arg_uv);
+	if (ret)
+		printf("failed to create uv dumb\n");
+	else
+		printf("create uv dumb ok\n");
+
+
+	handles[0] = create_arg_y.handle;
+	strides[0] = create_arg_y.pitch;
+	offsets[0] = 0;
+	printf("y stride = %u\n", strides[0]);
+	size = create_arg_y.size;
+	printf("y size %u %u\n", size, width * height);
+
+	handles[1] = create_arg_uv.handle;
+	strides[1] = create_arg_uv.pitch;
+	offsets[1] = 0;
+	printf("uv stride = %u\n", strides[1]);
+	size = create_arg_uv.size;
+	printf("uv size %u %u\n", size, width * height * 2);
+
+	ret = drmModeAddFB2(fd, width, height, DRM_FORMAT_NV24,
+			    handles, strides, offsets, fb_id,
+			    0);
+	if (ret < 0)
+		printf("failed to add fb2 %s\n", strerror(errno));
+	else
+		printf("create nv24 drm fb ok\n");
+
+	memset(&map_arg_y, 0, sizeof map_arg_y);
+	map_arg_y.handle = handles[0];
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &map_arg_y);
+	if (ret)
+		printf("failed to map y dumb\n");
+	else
+		printf("map y ok\n");
+
+	*map_y = mmap(NULL, create_arg_y.size, PROT_WRITE,
+		       MAP_SHARED, fd, map_arg_y.offset);
+	if ((*map_y) == MAP_FAILED)
+		printf("failed to map dumb y\n");
+
+	memset(&map_arg_uv, 0, sizeof map_arg_uv);
+	map_arg_uv.handle = handles[1];
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &map_arg_uv);
+	if (ret)
+		printf("failed to map uv dumb\n");
+	else
+		printf("map uv ok\n");
+
+	*map_uv = mmap(NULL, create_arg_uv.size, PROT_WRITE,
+		       MAP_SHARED, fd, map_arg_uv.offset);
+	if ((*map_uv) == MAP_FAILED)
+		printf("failed to map dumb uv\n");
+}
+
 void *create_dumb(s32 fd, u32 width, u32 height, u32 format, u32 *fb_id, u32 *h)
 {
 	struct drm_mode_create_dumb create_arg;
@@ -173,13 +253,14 @@ void *create_dumb(s32 fd, u32 width, u32 height, u32 format, u32 *fb_id, u32 *h)
 	create_arg.bpp = 32;
 	create_arg.width = width;
 	create_arg.height = height;
-
 	ret = drmIoctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &create_arg);
 	if (ret)
 		printf("failed to create dumb\n");
 
+
 	handles[0] = create_arg.handle;
 	strides[0] = create_arg.pitch;
+	offsets[0] = 0;
 	printf("stride = %u\n", strides[0]);
 	size = create_arg.size;
 	printf("%u %u\n", size, width * height *4);
@@ -216,6 +297,7 @@ s32 main(s32 argc, char **argv)
 	u32 mode_blob_id;
 	u32 b, flags, format;
 	u32 handle;
+	unsigned char *map_y, *map_uv;
 
 	width = atoi(argv[1]);
 	height = atoi(argv[2]);
@@ -243,8 +325,8 @@ s32 main(s32 argc, char **argv)
 		assert(planes[i].plane);
 	}
 
-	map = create_dumb(fd, width, height, DRM_FORMAT_XRGB8888, &fb_id, NULL);
-	printf("map = %p, fb_id = %u\n", map, fb_id);
+	create_dumb_nv24(fd, width, height, &fb_id, &map_y, &map_uv);
+	printf("map y = %p, map uv = %p fb_id = %u\n", map_y, map_uv, fb_id);
 
 	if (cursor_width) {
 	cursor = create_dumb(fd, cursor_width, cursor_height, DRM_FORMAT_XRGB8888, &fb_id_cursor, &handle);
@@ -321,10 +403,12 @@ s32 main(s32 argc, char **argv)
 			   strerror(errno));
 
 loop:
+/*
 	pixel = (u32 *)map;
 	for (s32 i = 0; i < size / 4; i++) {
 		pixel[i] = 0xFF00FF00;
 	}
+*/
 	flags = 0;
 //	flags = DRM_MODE_PAGE_FLIP_EVENT | DRM_MODE_ATOMIC_NONBLOCK;
 	drmModeAtomicAddProperty(req, outputs[0].crtc_id,
@@ -340,6 +424,41 @@ loop:
 				outputs[0].crtc_id);
 
 /////////////////////////////////////
+#if 1
+	drmModeAtomicAddProperty(req, planes[2].plane_id,
+				planes[2].prop_crtc_id,
+				outputs[0].crtc_id);
+
+	drmModeAtomicAddProperty(req, planes[2].plane_id,
+				planes[2].prop_fb_id,
+				fb_id);
+
+	drmModeAtomicAddProperty(req, planes[2].plane_id,
+				planes[2].prop_crtc_x,
+				0);
+	drmModeAtomicAddProperty(req, planes[2].plane_id,
+				planes[2].prop_crtc_y,
+				0);
+	drmModeAtomicAddProperty(req, planes[2].plane_id,
+				planes[2].prop_crtc_w,
+				heads[0].connector->modes[0].hdisplay);
+	drmModeAtomicAddProperty(req, planes[2].plane_id,
+				planes[2].prop_crtc_h,
+				heads[0].connector->modes[0].vdisplay);
+	
+	drmModeAtomicAddProperty(req, planes[2].plane_id,
+				planes[2].prop_src_x,
+				0);
+	drmModeAtomicAddProperty(req, planes[2].plane_id,
+				planes[2].prop_src_y,
+				0);
+	drmModeAtomicAddProperty(req, planes[2].plane_id,
+				planes[2].prop_src_w,
+				width << 16);
+	drmModeAtomicAddProperty(req, planes[2].plane_id,
+				planes[2].prop_src_h,
+				height << 16);
+#else
 	drmModeAtomicAddProperty(req, planes[0].plane_id,
 				planes[0].prop_crtc_id,
 				outputs[0].crtc_id);
@@ -373,6 +492,7 @@ loop:
 	drmModeAtomicAddProperty(req, planes[0].plane_id,
 				planes[0].prop_src_h,
 				height << 16);
+#endif
 
 	if (1) {
 /////////////////////////////////////
@@ -419,15 +539,18 @@ loop:
 	ret = drmModeAtomicCommit(fd, req, flags, &b);
 	if (ret)
 		printf("Commit failed.");
+	getchar();
 
 	sleep(10);
 
 
 	flags = 0;
+/*
 	pixel = (u32 *)map;
 	for (s32 i = 0; i < size / 4; i++) {
 		pixel[i] = 0x80123456;
 	}
+*/
 	ret = drmModeAtomicCommit(fd, req, flags, &b);
 	if (ret)
 		printf("Commit failed.");

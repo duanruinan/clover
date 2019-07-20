@@ -22,6 +22,7 @@ CLOVER_UTILS_H += $(RPATH)/utils/clover_region.h
 CLOVER_UTILS_H += $(RPATH)/utils/clover_shm.h
 CLOVER_UTILS_H += $(RPATH)/utils/clover_signal.h
 CLOVER_UTILS_H += $(RPATH)/utils/clover_ipc.h
+CLOVER_UTILS_H += $(RPATH)/utils/clover_protocal.h
 
 PLATFORM_CFLAGS += -I${TOOLCHAIN_SYSROOT}/usr/include/libdrm
 
@@ -40,7 +41,8 @@ drm-backend-clean:
 main: libclover_compositor.so
 
 clover_config.o: clover_config.c \
-		$(RPATH)/server/compositor/clover_compositor.h
+		$(RPATH)/server/compositor/clover_compositor.h \
+		$(CLOVER_UTILS_H)
 	$(CC) -c $< $(CFLAGS) -o $@
 
 libclover_compositor.so: clover_compositor.o clover_config.o

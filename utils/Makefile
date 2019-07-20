@@ -18,6 +18,7 @@ CLOVER_UTILS_H += clover_region.h
 CLOVER_UTILS_H += clover_shm.h
 CLOVER_UTILS_H += clover_signal.h
 CLOVER_UTILS_H += clover_ipc.h
+CLOVER_UTILS_H += clover_protocal.h
 
 CLOVER_UTILS_OBJ += clover_log.o
 CLOVER_UTILS_OBJ += clover_array.o
@@ -26,6 +27,7 @@ CLOVER_UTILS_OBJ += clover_region.o
 CLOVER_UTILS_OBJ += clover_shm.o
 CLOVER_UTILS_OBJ += clover_signal.o
 CLOVER_UTILS_OBJ += clover_ipc.o
+CLOVER_UTILS_OBJ += clover_protocal.o
 
 all: $(OBJ)
 
@@ -48,6 +50,9 @@ clover_signal.o: clover_signal.c $(CLOVER_UTILS_H)
 	$(CC) -c $< $(CFLAGS) -o $@
 
 clover_ipc.o: clover_ipc.c $(CLOVER_UTILS_H)
+	$(CC) -c $< $(CFLAGS) -o $@
+
+clover_protocal.o: clover_protocal.c $(CLOVER_UTILS_H)
 	$(CC) -c $< $(CFLAGS) -o $@
 
 libclover_utils.so: $(CLOVER_UTILS_OBJ)

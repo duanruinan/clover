@@ -1,4 +1,5 @@
 #include <clover_utils.h>
+#include <clover_log.h>
 #include <clover_signal.h>
 
 void clv_signal_init(struct clv_signal *signal)
@@ -27,7 +28,8 @@ void clv_signal_emit(struct clv_signal *signal, void *data)
 {
 	struct clv_listener *l, *next;
 
-	list_for_each_entry_safe(l, next, &signal->listener_list, link)
+	list_for_each_entry_safe(l, next, &signal->listener_list, link) {
 		l->notify(l, data);
+	}
 }
 

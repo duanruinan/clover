@@ -27,6 +27,7 @@
 #include <clover_shm.h>
 #include <clover_signal.h>
 #include <clover_event.h>
+#include <clover_protocal.h>
 
 struct clv_renderer;
 struct clv_surface;
@@ -55,11 +56,11 @@ struct clv_output_config {
 	u32 index;
 	s32 count_layers;
 	u32 max_w, max_h;
-	struct clv_rect render_area;
 	struct clv_layer_config layers[16];
 	struct clv_layer_config *primary_layer;
 	struct list_head overlay_layers;
 	struct clv_layer_config *cursor_layer;
+	struct clv_rect render_area;
 };
 
 struct clv_encoder_config {
@@ -77,26 +78,105 @@ struct clv_config {
 	enum clv_desktop_mode mode;
 	s32 count_heads;
 	struct clv_head_config heads[8];
+	struct clv_rect rects[8];
 };
 
 struct clv_config *load_config_from_file(const char *xml);
 
+struct clv_client_agent {
+	s32 sock;
+	struct clv_compositor *c;
+	struct list_head link;
+	struct clv_surface *surface;
+	struct clv_view *view;
+	struct list_head buffers;
+	struct clv_event_source *client_source;
+	s32 f;
+
+	u8 *ipc_rx_buf;
+	u32 ipc_rx_buf_sz;
+
+	u8 *surface_id_created_tx_cmd_t;
+	u8 *surface_id_created_tx_cmd;
+	u32 surface_id_created_tx_len;
+
+	u8 *view_id_created_tx_cmd_t;
+	u8 *view_id_created_tx_cmd;
+	u32 view_id_created_tx_len;
+
+	u8 *bo_id_created_tx_cmd_t;
+	u8 *bo_id_created_tx_cmd;
+	u32 bo_id_created_tx_len;
+
+	u8 *commit_ack_tx_cmd_t;
+	u8 *commit_ack_tx_cmd;
+	u32 commit_ack_tx_len;
+
+	u8 *bo_complete_tx_cmd_t;
+	u8 *bo_complete_tx_cmd;
+	u32 bo_complete_tx_len;
+
+	u8 *destroy_ack_tx_cmd_t;
+	u8 *destroy_ack_tx_cmd;
+	u32 destroy_ack_tx_len;
+};
+
 struct clv_display {
 	struct clv_event_loop *loop;
 	s32 exit;
-	struct list_head clients;
 };
 
-struct clv_event_loop *clv_display_get_event_loop(struct clv_display *display);
-struct clv_display *clv_display_create(void);
-void clv_display_run(struct clv_display *display);
-void clv_display_stop(struct clv_display *display);
-void clv_display_destroy(struct clv_display *display);
-
+#define PLANE_NAME_LEN 16
 struct clv_plane {
 	struct clv_compositor *c;
+	u32 index;
+	struct clv_output *output;
 	struct list_head link;
-	/* struct clv_region damage; */
+	char name[PLANE_NAME_LEN]; /* C--X / P-X / O-X */
+};
+
+struct clv_surface {
+	struct clv_compositor *c;
+	void *renderer_state;
+	s32 is_opaque;
+	struct clv_signal destroy_signal;
+	struct clv_view *view;
+	struct clv_region damage; /* used for texture upload */
+	u32 w, h; /* surface size */
+	struct clv_region opaque; /* opaque area */
+	u32 output_mask;
+	struct clv_output *primary_output;
+	struct clv_listener flip_listener;
+	s32 is_bg;
+	struct clv_client_agent *agent;
+};
+
+struct clv_view {
+	enum clv_view_type type;
+	struct clv_plane *plane;
+	struct clv_surface *surface;
+	struct list_head link;
+	struct clv_rect area; /* in canvas coordinates */
+	float alpha;
+	u32 output_mask;
+	s32 painted;
+	s32 need_to_draw;
+};
+
+struct clv_buffer {
+	enum clv_buffer_type type;
+	u32 w, h, stride;
+	u32 size;
+	enum clv_pixel_fmt pixel_fmt;
+	s32 count_planes;
+	char name[CLV_BUFFER_NAME_LEN];
+	s32 fd;
+	struct list_head link; /* link to client agent */
+};
+
+struct shm_buffer {
+	struct clv_buffer base;
+	struct clv_shm shm;
 };
 
 struct clv_compositor {
@@ -105,59 +185,29 @@ struct clv_compositor {
 
 	struct clv_backend *backend;
 
+	clockid_t clk_id;
+
+	struct clv_event_source *repaint_timer;
+
 	struct clv_renderer *renderer;
 
-	struct clv_plane primary_plane;
+	struct clv_plane primary_plane; /* fake root plane */
 
 	struct list_head views;
 	struct list_head outputs;
 	struct list_head heads;
 	struct list_head planes;
 
-	clockid_t clock_type;
-	s32 repaint_msec;
-
-	/* output signals */
-	struct clv_signal output_created_signal;
-	struct clv_signal output_destroyed_signal;
-	struct clv_signal output_resized_signal;
-	/*
-	 * output idle repaint event.
-	 * It trigger the next start_repaint_loop, set repaint flag and change
-	 * repaint status from REPAINT_BEGIN_FROM_IDLE to
-	 * REPAINT_AWAITING_COMPLETION.
-	 *
-	 * This progress is triggered when head is attached or DPMS changed to
-	 * DPMS_ON.
-	 */
-	struct clv_event_source *idle_repaint_source;
-
 	/* head change signals used to invoke some callbacks */
 	struct clv_signal heads_changed_signal;
 	/* idle event added by Monitor's Hotplug */
 	struct clv_event_source *heads_changed_source;
 
-	/* global repaint timer event */
-	struct clv_event_source *repaint_timer_source;
+	struct clv_surface bg_surf;
+	struct clv_view bg_view;
+	struct shm_buffer bg_buf;
 };
 
-struct clv_compositor *clv_compositor_create(struct clv_display *display);
-void clv_compositor_destroy(struct clv_compositor *c);
-void clv_compositor_add_heads_changed_listener(struct clv_compositor *c,
-					       struct clv_listener *listener);
-void clv_compositor_schedule_heads_changed(struct clv_compositor *c);
-struct clv_head *clv_compositor_enumerate_head(struct clv_compositor *c,
-					       struct clv_head *last);
-void clv_output_init(struct clv_output *output,
-		     struct clv_compositor *c,
-		     struct clv_rect *render_area,
-		     u32 output_index,
-		     struct clv_head *head);
-void clv_output_deinit(struct clv_output *output);
-void clv_plane_init(struct clv_plane *plane, struct clv_compositor *c,
-		    struct clv_plane *above);
-void clv_plane_deinit(struct clv_plane *plane);
- 
 struct clv_backend {
 	void (*destroy)(struct clv_compositor *c);
 
@@ -193,18 +243,18 @@ struct clv_backend {
 	 */
 	void (*repaint_cancel)(struct clv_compositor *c, void *repaint_data);
 
-	/* establish a display path (GLES context + LCDC + Head) */
+	/*
+	 * establish a display path (LCDC + Signal Encoder + Head)
+	 * e.g. GLES output -> (Scanout Plane + Cursor Plane) CRTC0 ->
+	 *          HDMI Encoder -> HDMI Connector
+	 */
 	struct clv_output * (*output_create)(struct clv_compositor *c,
-					     struct clv_rect *render_area,
 					     struct clv_head_config *head_cfg);
 };
 
 void set_backend_dbg(u8 flag);
 
-enum clv_output_mode {
-	CLV_OUTPUT_MODE_CURRENT = 0x01,
-	CLV_OUTPUT_MODE_PREFERRED = 0x02,
-};
+#define MODE_PREFERRED 0x00000001
 
 struct clv_mode {
 	u32 flags;
@@ -213,92 +263,25 @@ struct clv_mode {
 	struct list_head link;
 };
 
-enum clv_dpms {
-	CLV_DPMS_ON,
-	CLV_DPMS_STANDBY,
-	CLV_DPMS_SUSPEND,
-	CLV_DPMS_OFF,
-};
-
 struct clv_head {
 	struct clv_compositor *c;
 	struct list_head link;
 	struct clv_output *output;
-	struct clv_mode *best_mode;
 	s32 connected;
+	s32 changed;
 	s32 index;
-	void (*head_enumerate_mode)(struct clv_head *head, u32 *w, u32 *h,
-				    void **last);
+	void (*retrieve_modes)(struct clv_head *head);
 };
 
-struct clv_surface {
-	struct clv_compositor *c;
-	void *renderer_state;
-	s32 is_opaque;
-	struct clv_signal destroy_signal;
-	struct clv_view *view;
-	struct clv_region damage; /* used for texture upload */
-	u32 w, h; /* surface size */
-	struct clv_region opaque; /* opaque area */
-};
-
-enum clv_view_type {
-	CLV_VIEW_TYPE_PRIMARY,
-	CLV_VIEW_TYPE_OVERLAY,
-	CLV_VIEW_TYPE_CURSOR,
-};
-
-struct clv_view {
-	enum clv_view_type type;
-	struct clv_plane *plane;
-	struct clv_surface *surface;
-	struct list_head link;
-	struct clv_rect area; /* in canvas coordinates */
-	float alpha;
-};
-
-enum clv_buffer_type {
-	CLV_BUF_TYPE_UNKNOWN = 0,
-	CLV_BUF_TYPE_SHM,
-	CLV_BUF_TYPE_DMA,
-};
-
-enum clv_pixel_fmt {
-	CLV_PIXEL_FMT_UNKNOWN = 0,
-	CLV_PIXEL_FMT_XRGB8888,
-	CLV_PIXEL_FMT_ARGB8888,
-	CLV_PIXEL_FMT_YUV420P,
-	CLV_PIXEL_FMT_YUV444P,
-};
-
-#define CLV_BUFFER_NAME_LEN 128
-struct clv_buffer {
-	enum clv_buffer_type type;
-	u32 w, h, stride;
-	u32 size;
-	enum clv_pixel_fmt pixel_fmt;
-	s32 count_planes;
-	char name[CLV_BUFFER_NAME_LEN];
-	s32 fd;
-};
-
-struct shm_buffer {
-	struct clv_buffer base;
-	struct clv_shm shm;
+enum clv_dpms {
+	CLV_DPMS_ON,
+	CLV_DPMS_OFF,
 };
 
 struct clv_output {
 	struct clv_compositor *c;
-
 	u32 index;
-
-	void *renderer_state;
-
-	struct clv_rect render_area; /* in canvas coordinates */
-
-	s32 repaint_needed; /* true if damage occured since the last repaint */
-
-	s32 repainted; /* used between repaint_begin and repaint_cancel */
+	struct clv_head *head;
 
 	enum {
 		REPAINT_NOT_SCHEDULED = 0,
@@ -306,40 +289,33 @@ struct clv_output {
 		REPAINT_SCHEDULED,
 		REPAINT_AWAITING_COMPLETION,
 	} repaint_status;
-
-	/* if repaint status is REPAINT_SCHEDULED, contains the time the next
-	 * repaint should be run */
-	struct timespec next_repaint;
-
 	struct clv_event_source *idle_repaint_source;
+	s32 repaint_needed;
+	s32 repaint_pending;
+	struct timespec next_repaint;
+	s32 repainted;
 
-	struct clv_signal frame_signal;
-	struct clv_signal destroy_signal; /* sent when disabled */
-
-	struct timespec frame_time; /* presentation timestamp */
-	u64 msc; /* media stream counter */
+	void *renderer_state;
+	struct clv_rect render_area; /* in canvas coordinates */
+	s32 changed;
 
 	struct clv_mode *current_mode;
 	struct list_head modes;
 
-	struct clv_head *head;
-
 	s32 enabled;
+
+	s32 primary_dirty;
+
+	struct clv_signal flip_signal;
 
 	void (*start_repaint_loop)(struct clv_output *output);
 	s32 (*repaint)(struct clv_output *output, void *repaint_data);
 	void (*assign_planes)(struct clv_output *output, void *repaint_data);
 	void (*destroy)(struct clv_output *output);
-	s32 (*switch_mode)(struct clv_output *output, struct clv_mode *mode);
-	void (*set_dpms)(struct clv_output *output, enum clv_dpms level);
-	s32 (*enable)(struct clv_output *output);
+	void (*enable)(struct clv_output *output, struct clv_rect *render_area);
 	s32 (*disable)(struct clv_output *output);
 
 	struct list_head link;
-
-	struct clv_surface bg_surf;
-	struct clv_view bg_view;
-	struct shm_buffer bg_buf;
 };
 
 struct clv_renderer {
@@ -361,8 +337,29 @@ struct clv_renderer {
 					     u32 stride,
 					     enum clv_pixel_fmt pixel_fmt,
 					     u32 internal_fmt);
+	void (*release_dmabuf)(struct clv_compositor *c,
+			       struct clv_buffer *buffer);
 	void (*output_destroy)(struct clv_output *output);
 	clockid_t (*get_clock_type)(struct clv_compositor *c);
+};
+
+struct clv_server {
+	struct clv_display *display;
+	struct clv_event_loop *loop;
+	struct clv_event_source *sig_int_source, *sig_tem_source;
+	struct clv_config *config;
+	struct clv_compositor *c;
+	struct clv_listener hpd_listener;
+	s32 count_outputs;
+	struct clv_output *outputs[8];
+
+	struct list_head client_agents;
+	s32 server_sock;
+	struct clv_event_source *server_source;
+
+	u8 *linkid_created_ack_tx_cmd_t;
+	u8 *linkid_created_ack_tx_cmd;
+	u32 linkid_created_ack_tx_len;
 };
 
 s32 renderer_create(struct clv_compositor *c, s32 *formats, s32 count_fmts,
@@ -429,10 +426,37 @@ static inline s64 timespec_sub_to_msec(const struct timespec *a,
 	return timespec_sub_to_nsec(a, b) / 1000000;
 }
 
-/* An invalid flag in presented_flags to catch logic errors. */
-#define PRESENTATION_FEEDBACK_INVALID (1U << 31)
+struct clv_compositor *clv_compositor_create(struct clv_display *display);
+void clv_compositor_destroy(struct clv_compositor *c);
+void clv_compositor_add_heads_changed_listener(struct clv_compositor *c,
+					       struct clv_listener *listener);
+void clv_compositor_schedule_heads_changed(struct clv_compositor *c);
+struct clv_event_loop *clv_display_get_event_loop(struct clv_display *display);
+struct clv_display *clv_display_create(void);
+void clv_display_run(struct clv_display *display);
+void clv_display_stop(struct clv_display *display);
+void clv_display_destroy(struct clv_display *display);
+void clv_compositor_choose_mode(struct clv_output *output,
+				struct clv_head_config *head_cfg);
+void clv_output_schedule_repaint(struct clv_output *output, s32 cnt);
+void clv_compositor_schedule_repaint(struct clv_compositor *c);
+void clv_surface_schedule_repaint(struct clv_surface *surface);
+void clv_view_schedule_repaint(struct clv_view *view);
+void clv_output_finish_frame(struct clv_output *output, struct timespec *stamp);
+void clv_surface_destroy(struct clv_surface *s);
+struct clv_surface *clv_surface_create(struct clv_compositor *c,
+				       struct clv_surface_info *si,
+				       struct clv_client_agent *agent);
+void clv_view_destroy(struct clv_view *v);
+struct clv_view *clv_view_create(struct clv_surface *s,
+				 struct clv_view_info *vi);
+void clv_surface_add_flip_listener(struct clv_surface *s);
 
-#define DEFAULT_REPAINT_MSEC 7
+struct clv_client_agent *client_agent_create(
+	struct clv_server *s,
+	s32 sock,
+	s32 (*client_sock_cb)(s32 fd, u32 mask, void *data));
+void client_agent_destroy(struct clv_client_agent *agent);
 
 #endif
 

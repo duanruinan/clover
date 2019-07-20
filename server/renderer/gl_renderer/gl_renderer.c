@@ -103,6 +103,17 @@ static const char texture_fragment_shader_rgbx[] =
 	"   gl_FragColor.a = alpha;\n"
 	;
 
+static const char texture_fragment_shader_egl_external[] =
+	"#extension GL_OES_EGL_image_external : require\n"
+	"precision mediump float;\n"
+	"varying vec2 v_texcoord;\n"
+	"uniform samplerExternalOES tex;\n"
+	"uniform float alpha;\n"
+	"void main()\n"
+	"{\n"
+	"   gl_FragColor = alpha * texture2D(tex, v_texcoord)\n;"
+	;
+
 #define FRAGMENT_CONVERT_YUV						\
 	"  y *= alpha;\n"						\
 	"  u *= alpha;\n"						\
@@ -208,6 +219,7 @@ struct gl_display {
 	struct list_head dmabuf_images;
 
 	struct gl_shader texture_shader_rgba;
+	struct gl_shader texture_shader_egl_external;
 	struct gl_shader texture_shader_rgbx;
 	struct gl_shader texture_shader_y_u_v;
 	struct gl_shader *current_shader;
@@ -553,6 +565,10 @@ static void set_shaders(struct clv_compositor *c)
 	disp->texture_shader_rgba.vertex_source = vertex_shader;
 	disp->texture_shader_rgba.fragment_source =texture_fragment_shader_rgba;
 
+	disp->texture_shader_egl_external.vertex_source = vertex_shader;
+	disp->texture_shader_egl_external.fragment_source =
+		texture_fragment_shader_egl_external;
+
 	disp->texture_shader_rgbx.vertex_source = vertex_shader;
 	disp->texture_shader_rgbx.fragment_source =texture_fragment_shader_rgbx;
 
@@ -675,6 +691,7 @@ static void gl_surface_state_destroy(struct gl_surface_state *gs)
 		if (gs->surface)
 			gs->surface->renderer_state = NULL;
 		glDeleteTextures(gs->count_textures, gs->textures);
+		/*
 		buffer = gs->buffer;
 		if (buffer && buffer->type == CLV_BUF_TYPE_DMA) {
 			dmabuf = container_of(buffer, struct dma_buffer, base);
@@ -685,7 +702,12 @@ static void gl_surface_state_destroy(struct gl_surface_state *gs)
 				dmabuf->image = EGL_NO_IMAGE_KHR;
 			}
 		}
+		*/
 		clv_region_fini(&gs->texture_damage);
+		list_del(&gs->display_destroy_listener.link);
+		INIT_LIST_HEAD(&gs->display_destroy_listener.link);
+		list_del(&gs->surface_destroy_listener.link);
+		INIT_LIST_HEAD(&gs->surface_destroy_listener.link);
 		free(gs);
 	}
 }
@@ -747,8 +769,9 @@ static void alloc_textures(struct gl_surface_state *gs, s32 count_textures)
 {
 	s32 i;
 
-	if (count_textures <= gs->count_textures)
+	if (count_textures <= gs->count_textures) {
 		return;
+	}
 
 	for (i = gs->count_textures; i < count_textures; i++) {
 		glGenTextures(1, &gs->textures[i]);
@@ -781,11 +804,13 @@ static void gl_attach_dma_buffer(struct clv_surface *surface,
 		return;
 	}
 	gs->target = GL_TEXTURE_2D;
+	//gs->target = GL_TEXTURE_EXTERNAL_OES;
 	alloc_textures(gs, 1);
 	glActiveTexture(GL_TEXTURE0);
 	glBindTexture(gs->target, gs->textures[0]);
 	disp->image_target_texture_2d(gs->target, dmabuf->image);
 	gs->shader = &disp->texture_shader_rgba;
+	//gs->shader = &disp->texture_shader_egl_external;
 	gs->pitch = buffer->stride / 4;
 	gs->h = buffer->h;
 	gs->buf_type = CLV_BUF_TYPE_DMA;
@@ -1243,7 +1268,7 @@ static s32 texture_region(struct clv_view *view, struct clv_region *region,
 
 				/* texcoord: */
 				*(v++) = bx * inv_w;
-				gles_debug("%f %f %u\n", bx, inv_w, gs->pitch);
+				gles_debug("%f %f %u", bx, inv_w, gs->pitch);
 				if (gs->y_inverted) {
 					*(v++) = by * inv_h;
 				} else {
@@ -1330,12 +1355,19 @@ static void draw_view(struct clv_view *v, struct clv_output *output,
 			   boxes[i].p2.x, boxes[i].p2.y);
 	}
 	
+	gles_debug("view_area %d,%d %ux%u", v->area.pos.x, v->area.pos.y,
+			     v->area.w, v->area.h);
 	clv_region_init_rect(&view_area, v->area.pos.x, v->area.pos.y,
 			     v->area.w, v->area.h);
 	clv_region_init_rect(&output_area, output->render_area.pos.x,
 			     output->render_area.pos.y,
 			     output->render_area.w,
 			     output->render_area.h);
+	gles_debug("output area: %d,%d %ux%u",
+		   output->render_area.pos.x,
+		   output->render_area.pos.y,
+		   output->render_area.w,
+		   output->render_area.h);
 	clv_region_intersect(&view_area, &view_area, &output_area);
 
 	if (!clv_region_is_not_empty(&view_area))
@@ -1404,6 +1436,7 @@ static void draw_view(struct clv_view *v, struct clv_output *output,
 out:
 	clv_region_fini(&view_area);
 	clv_region_fini(&output_area);
+	v->painted = 1;
 }
 
 static void repaint_views(struct clv_output *output, struct clv_region *damage)
@@ -1412,8 +1445,12 @@ static void repaint_views(struct clv_output *output, struct clv_region *damage)
 	struct clv_view *view;
 
 	list_for_each_entry_reverse(view, &c->views, link) {
-		if (view->type == CLV_VIEW_TYPE_PRIMARY) {
+		gles_debug("view plane %p, primary_plane %p",
+			   view->plane, &output->c->primary_plane);
+		//if (view->type == CLV_VIEW_TYPE_PRIMARY) {
+		if (view->plane == &output->c->primary_plane) {
 			draw_view(view, output, damage);
+			view->need_to_draw = 0;
 		}
 	}
 }
@@ -1427,11 +1464,39 @@ static void gl_repaint_output(struct clv_output *output)
 	struct clv_region total_damage;
 	EGLBoolean ret;
 	static s32 errored = 0;
+	s32 left, top, calc;
+	u32 width, height;
+
+	if (output->changed) {
+		glViewport(0, 0, output->current_mode->w,
+			   output->current_mode->h);
+		glClear(GL_COLOR_BUFFER_BIT);
+		output->changed = 0;
+	}
+	calc = output->current_mode->w * output->render_area.h
+		/ output->render_area.w;
+	if (calc <= output->current_mode->h) {
+		left = 0;
+		top = (output->current_mode->h - calc) / 2;
+		width = output->current_mode->w;
+		height = calc;
+	} else {
+		calc = output->render_area.w * output->current_mode->h
+			/ output->render_area.h;
+		left = (output->current_mode->w - calc) / 2;
+		top = 0;
+		width = calc;
+		height = output->current_mode->h;
+	}
 
 	if (gl_switch_output(output) < 0)
 		return;
 
-	glViewport(0, 0, area->w, area->h);
+	//glViewport(0, 0, area->w, area->h);
+	//gles_debug("%d,%d %ux%u", 0, 0, area->w, area->h);
+	glViewport(left, top, width, height);
+	gles_debug("%d,%d %ux%u %ux%u", left, top, width, height,
+		 output->current_mode->w, output->current_mode->h);
 
 	clv_region_init_rect(&total_damage, 0, 0, area->w, area->h);
 	repaint_views(output, &total_damage);
@@ -1666,6 +1731,30 @@ static void gl_output_destroy(struct clv_output *output)
 	free(go);
 }
 
+static void gl_dmabuf_release(struct clv_compositor *c,
+			      struct clv_buffer *buffer)
+{
+	struct gl_display *disp = get_display(c);
+	struct dma_buffer *dma_buf = container_of(buffer, struct dma_buffer,
+						  base);
+
+	if (!dma_buf)
+		return;
+
+	if (dma_buf->image != EGL_NO_IMAGE_KHR) {
+		printf("destroy egl image\n");
+		disp->destroy_image(disp->egl_display, dma_buf->image);
+		dma_buf->image = EGL_NO_IMAGE_KHR;
+	}
+
+	printf("close fd %d\n", buffer->fd);
+	close(buffer->fd);
+
+	list_del(&dma_buf->link);
+	printf("free dma buffer\n");
+	free(dma_buf);
+}
+
 static struct clv_buffer *gl_import_dmabuf(struct clv_compositor *c,
 					   s32 fd, u32 w, u32 h,
 					   u32 stride,
@@ -1677,7 +1766,7 @@ static struct clv_buffer *gl_import_dmabuf(struct clv_compositor *c,
 	EGLint attribs[50] = {0};
 	s32 attrib = 0;
 
-	printf("fd = %d\n", fd);
+	printf("fd = %d stride = %u width = %u\n", fd, stride, w);
 	if (!disp->support_dmabuf_import) {
 		clv_err("cannot support dmabuf import feature.");
 		return NULL;
@@ -1812,6 +1901,7 @@ s32 gl_renderer_create(struct clv_compositor *c, s32 *formats, s32 count_fmts,
 	disp->base.output_destroy = gl_output_destroy;
 	disp->base.destroy = gl_display_destroy;
 	disp->base.import_dmabuf = gl_import_dmabuf;
+	disp->base.release_dmabuf = gl_dmabuf_release;
 
 	gles_dbg = 0;
 	egl_dbg = 0;

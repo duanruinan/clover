@@ -27,6 +27,7 @@ CLOVER_UTILS_H += $(RPATH)/utils/clover_region.h
 CLOVER_UTILS_H += $(RPATH)/utils/clover_shm.h
 CLOVER_UTILS_H += $(RPATH)/utils/clover_signal.h
 CLOVER_UTILS_H += $(RPATH)/utils/clover_ipc.h
+CLOVER_UTILS_H += $(RPATH)/utils/clover_protocal.h
 
 all: $(OBJ)
 
@@ -60,6 +61,7 @@ clover_server: main.o \
 		$(RPATH)/server/renderer/libclover_renderer.so
 	$(CC) $< $(LDFLAGS) -o $@
 
-main.o: main.c
+main.o: main.c $(RPATH)/server/compositor/clover_compositor.h \
+		$(CLOVER_UTILS_H)
 	$(CC) -c $< -I. $(CFLAGS) -o $@
 

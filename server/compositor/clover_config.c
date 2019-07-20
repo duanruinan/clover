@@ -185,7 +185,7 @@ static char *parse_layer_node(struct clv_layer_config *layer, char *buf)
 
 static char *parse_output_attrib(struct clv_output_config *output, char *buf)
 {
-	char *p, *q, *l, *r;
+	char *p, *q, *l, *r, *s;
 	char buffer[64];
 
 	p = buf;
@@ -234,6 +234,27 @@ static char *parse_output_attrib(struct clv_output_config *output, char *buf)
 	memcpy(buffer, l, r - l);
 	output->count_layers = atoi(buffer);
 	/* printf("output->count_layers = %d\n", output->count_layers); */
+
+	q = p;
+	l = strstr(q, "def_rect=\"");
+	assert(l);
+	l = l + strlen("def_rect=\"");
+	assert(l);
+	strip_blank(l);
+	r = strstr(l, "\"");
+	memset(buffer, 0, 64);
+	memcpy(buffer, l, r - l);
+	s = strtok(buffer, ",/x");
+	output->render_area.pos.x = atoi(s);
+	s = strtok(NULL, ",/x");
+	output->render_area.pos.y = atoi(s);
+	s = strtok(NULL, ",/x");
+	output->render_area.w = atoi(s);
+	s = strtok(NULL, ",/x");
+	output->render_area.h = atoi(s);
+	printf("output->render_area = %d,%d/%ux%u\n", output->render_area.pos.x,
+		output->render_area.pos.y, output->render_area.w,
+		output->render_area.h);
 
 	strip_blank(r);
 	return r;
@@ -423,6 +444,7 @@ struct clv_config *load_config_from_file(const char *xml)
 	config = calloc(1, sizeof(*config));
 	if (!config)
 		return NULL;
+	memset(config, 0, sizeof(*config));
 	parse_config(config, buf);
 	free(buf);
 	return config;

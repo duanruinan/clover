@@ -19,6 +19,8 @@
 #define USE_YUV420_BG 1
 //#define USE_YUV444_BG 1
 
+unsigned int winWidth, winHeight, o_width, o_height;
+
 struct display {
    struct clv_compositor compositor;
    struct clv_output output;
@@ -50,6 +52,8 @@ draw(s32 x, s32 y, u32 w1, u32 h1, u32 w2, u32 h2)
    static u32 color2 = 0xFF0000FF;
    s32 i;
 
+   printf("view1: %ux%u\n", view1->area.w, view1->area.h);
+   printf("surf1: %ux%u\n", surface1->w, surface1->h);
    if (!last_w1) {
       last_w1 = w1;
       last_h1 = h1;
@@ -77,6 +81,7 @@ draw(s32 x, s32 y, u32 w1, u32 h1, u32 w2, u32 h2)
    data2 = pbuf1->shm.map;
    memset(data2, 0, pbuf1->base.size);
 #endif
+/*
    if (last_w1 != w1 || last_h1 != h1) {
       printf("resize %u %u !!!\n", w1, h1);
       output->render_area.w = w1;
@@ -107,6 +112,7 @@ draw(s32 x, s32 y, u32 w1, u32 h1, u32 w2, u32 h2)
       clv_region_fini(&surface1->damage);
       clv_region_init_rect(&surface1->damage, w1/10, h1/10, w1/5*4, h1/5*4);
    }
+*/
    c->renderer->attach_buffer(surface1, &pbuf1->base);
    c->renderer->flush_damage(surface1);
 
@@ -168,6 +174,7 @@ init(Display *x_dpy, Window *win, u32 win_w, u32 win_h, u32 w1, u32 h1,
    INIT_LIST_HEAD(&c->views);
    INIT_LIST_HEAD(&c->outputs);
 
+   printf("%s(): %d\n", __func__, __LINE__);
    memset(output, 0, sizeof(*output));
    output->c = c;
    output->render_area.pos.x = 0;
@@ -186,6 +193,7 @@ init(Display *x_dpy, Window *win, u32 win_w, u32 win_h, u32 w1, u32 h1,
    clv_region_init_rect(&surface1->opaque, 0, 0, w1, h1);
    clv_signal_init(&surface1->destroy_signal);
 
+   printf("%s(): %d\n", __func__, __LINE__);
    memset(surface2, 0, sizeof(*surface2));
    surface2->c = c;
    surface2->is_opaque = 0;
@@ -196,6 +204,7 @@ init(Display *x_dpy, Window *win, u32 win_w, u32 win_h, u32 w1, u32 h1,
    clv_region_init_rect(&surface2->opaque, 0, 0, w2, h2);
    clv_signal_init(&surface2->destroy_signal);
 
+   printf("%s(): %d\n", __func__, __LINE__);
    memset(view1, 0, sizeof(*view1));
    view1->surface = surface1;
    view1->type = CLV_VIEW_TYPE_PRIMARY;
@@ -204,6 +213,7 @@ init(Display *x_dpy, Window *win, u32 win_w, u32 win_h, u32 w1, u32 h1,
    view1->area.w = w1;
    view1->area.h = h1;
    view1->alpha = 1.0f;
+   view1->plane = &c->primary_plane;
    list_add_tail(&view1->link, &c->views);
 
    memset(view2, 0, sizeof(*view2));
@@ -214,6 +224,7 @@ init(Display *x_dpy, Window *win, u32 win_w, u32 win_h, u32 w1, u32 h1,
    view2->area.w = w2;
    view2->area.h = h2;
    view2->alpha = 1.0f;
+   view2->plane = &c->primary_plane;
    list_add_tail(&view2->link, &c->views);
 
    memset(pbuf1, 0, sizeof(*pbuf1));
@@ -222,7 +233,7 @@ init(Display *x_dpy, Window *win, u32 win_w, u32 win_h, u32 w1, u32 h1,
    pbuf1->base.h = h1;
 #ifdef USE_YUV444_BG
    pbuf1->base.stride = w1;
-   pbuf1->base.size = 1920 * 1080 * 3;
+   pbuf1->base.size = 1920 * 1200 * 3;
    pbuf1->base.pixel_fmt = CLV_PIXEL_FMT_YUV444P;
    pbuf1->base.count_planes = 3;
    sprintf(pbuf1->base.name, "testshm%d", 0);
@@ -232,7 +243,7 @@ init(Display *x_dpy, Window *win, u32 win_w, u32 win_h, u32 w1, u32 h1,
 #else
 #ifdef USE_YUV420_BG
    pbuf1->base.stride = w1;
-   pbuf1->base.size = 1920 * 1080 * 3 / 2;
+   pbuf1->base.size = 1920 * 1200 * 3 / 2;
    pbuf1->base.pixel_fmt = CLV_PIXEL_FMT_YUV420P;
    pbuf1->base.count_planes = 3;
    sprintf(pbuf1->base.name, "testshm%d", 0);
@@ -242,7 +253,7 @@ init(Display *x_dpy, Window *win, u32 win_w, u32 win_h, u32 w1, u32 h1,
 #else
 #ifdef USE_RGB_BG
    pbuf1->base.stride = w1 * 4;
-   pbuf1->base.size = 1920 * 1080 * 4;
+   pbuf1->base.size = 1920 * 1200 * 4;
    pbuf1->base.pixel_fmt = CLV_PIXEL_FMT_ARGB8888;
    pbuf1->base.count_planes = 1;
    sprintf(pbuf1->base.name, "testshm%d", 0);
@@ -261,7 +272,7 @@ init(Display *x_dpy, Window *win, u32 win_w, u32 win_h, u32 w1, u32 h1,
    pbuf2->base.h = h2;
    pbuf2->base.stride = w2 * 4;
    //pbuf2->base.size = w2 * h2 * 4;
-   pbuf2->base.size = 1920 * 1080 * 4;
+   pbuf2->base.size = 1920 * 1200 * 4;
    pbuf2->base.pixel_fmt = CLV_PIXEL_FMT_ARGB8888;
    pbuf2->base.count_planes = 1;
    sprintf(pbuf2->base.name, "testshm%d", 1);
@@ -271,11 +282,15 @@ init(Display *x_dpy, Window *win, u32 win_w, u32 win_h, u32 w1, u32 h1,
    for (j = 0; j < pbuf2->base.size / 4; j++)
       pixel[j] = 0xFFFFFF00;
 
+   printf("%s(): %d\n", __func__, __LINE__);
    renderer_create(c, NULL, 0, 0, x_dpy, vid);
 //   set_renderer_dbg(0x33);
+   printf("%s(): %d\n", __func__, __LINE__);
 
    c->renderer->attach_buffer(surface1, &pbuf1->base);
+   printf("%s(): %d\n", __func__, __LINE__);
    c->renderer->flush_damage(surface1);
+   printf("%s(): %d\n", __func__, __LINE__);
    printf("vid = %u\n", *vid);
 }
 
@@ -417,9 +432,12 @@ event_loop(Display *dpy, Window win, u32 w1, u32 h1, u32 w2, u32 h2, u32 win_w, 
    s32 x, y;
    s32 delta_x = 2;
    s32 delta_y = 2;
+   static s32 cnt = 0;
 
+//   printf("w1 = %u h1 = %u w2 = %u h2 = %u\n", w1, h1, w2, h2);
    x = y = 0;
    while (1) {
+      cnt++;
       s32 redraw = 0;
       XEvent event;
 
@@ -431,8 +449,11 @@ event_loop(Display *dpy, Window win, u32 w1, u32 h1, u32 w2, u32 h2, u32 win_w, 
            redraw = 1;
            break;
         case ConfigureNotify:
-           w1 = event.xconfigure.width;
-           h1 = event.xconfigure.height;
+           //w1 = event.xconfigure.width;
+           //h1 = event.xconfigure.height;
+           g_disp.output.current_mode->w = event.xconfigure.width;
+           g_disp.output.current_mode->h = event.xconfigure.height;
+           g_disp.output.changed = 1;
            //reshape(w, h);
            break;
         default:
@@ -445,17 +466,37 @@ event_loop(Display *dpy, Window win, u32 w1, u32 h1, u32 w2, u32 h2, u32 win_w, 
       draw(x, y, w1, h1, w2, h2);
       x += delta_x;
       y += delta_y;
-      if ((x + w2) > w1) {
+//      printf("cnt = %u\n", cnt);
+      if (cnt == 400) {
+         o_width = 1600;
+         o_height = 900;
+         g_disp.output.render_area.w = 1600;
+         g_disp.output.render_area.h = 900;
+         g_disp.output.changed = 1;
+      } else if (cnt == 1200) {
+         o_width = 1920;
+         o_height = 1200;
+         g_disp.output.render_area.w = 1920;
+         g_disp.output.render_area.h = 1200;
+         g_disp.output.changed = 1;
+      }
+      if ((x + w2) > o_width) {
+          printf("(x + w2) > w1 %d %u %u\n", x, w2, o_width);
+          printf("w1 = %u h1 = %u w2 = %u h2 = %u\n", w1, h1, w2, h2);
           delta_x = -2;
           continue;
       } else if (x < 0) {
+          printf("x < 0 %d\n", x);
           delta_x = 2;
           continue;
       }
-      if ((y + h2) > h1) {
+      if ((y + h2) > o_height) {
+          printf("(y + h2) > h1 %d %u %u\n", y, h2, o_height);
+          printf("w1 = %u h1 = %u w2 = %u h2 = %u\n", w1, h1, w2, h2);
           delta_y = -2;
           continue;
       } else if (y < 0) {
+          printf("y < 0 %d\n", y);
           delta_y = 2;
           continue;
       }
@@ -465,7 +506,6 @@ event_loop(Display *dpy, Window win, u32 w1, u32 h1, u32 w2, u32 h2, u32 win_w, 
 
 s32 main(s32 argc, char *argv[])
 {
-   const int winWidth = 1400, winHeight = 1000;
    Display *x_dpy;
    Window win;
    EGLint vid, vid1;
@@ -474,7 +514,15 @@ s32 main(s32 argc, char *argv[])
    EGLint egl_major, egl_minor;
    int i;
    const char *s;
+   struct clv_mode mode = {
+      .w = 800,
+      .h = 600,
+   };
 
+   winWidth = atoi(argv[1]);
+   winHeight = atoi(argv[2]);
+   o_width = atoi(argv[3]);
+   o_height = atoi(argv[4]);
    x_dpy = XOpenDisplay(NULL);
    if (!x_dpy) {
       printf("Error: couldn't open display %s\n",
@@ -482,18 +530,29 @@ s32 main(s32 argc, char *argv[])
       return -1;
    }
 
-   init(x_dpy, &win, winWidth, winHeight, winWidth, winHeight, 700, 500, &vid);
+   g_disp.output.current_mode = &mode;
+   printf("%s(): %d\n", __func__, __LINE__);
+   //init(x_dpy, &win, winWidth, winHeight, winWidth, winHeight, 700, 500, &vid);
+   init(x_dpy, &win, o_width, o_height, o_width, o_height, 700, 500, &vid);
+   printf("%s(): %d\n", __func__, __LINE__);
    make_x_window(x_dpy, vid,
                  "OpenGL ES 2.x tri", 0, 0, winWidth, winHeight,
                  &win);
+   printf("%s(): %d\n", __func__, __LINE__);
 
    XMapWindow(x_dpy, win);
+   g_disp.output.current_mode = &mode;
+   g_disp.output.current_mode->w = winWidth;
+   g_disp.output.current_mode->h = winHeight;
+   printf("%s(): %d\n", __func__, __LINE__);
    g_disp.compositor.renderer->output_create(&g_disp.output, win, NULL, NULL, 0, &vid1);
+   printf("%s(): %d\n", __func__, __LINE__);
    printf("vid1 = %u\n", vid1);
 
    reshape(winWidth, winHeight);
 
-   event_loop(x_dpy, win, winWidth, winHeight, 700, 500, winWidth, winHeight);
+//   event_loop(x_dpy, win, winWidth, winHeight, 700, 500, winWidth, winHeight);
+   event_loop(x_dpy, win, o_width, o_height, 700, 500, winWidth, winHeight);
 
    return 0;
 }

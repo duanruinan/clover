@@ -63,8 +63,7 @@ struct client_window {
 	s32 x, y;
 	u32 w, h;
 	enum clv_pixel_fmt pixel_fmt;
-	struct dma_buf bufs[2];
-	s32 back_buf;
+	struct dma_buf buf;
 	struct {
 		GLuint program;
 		GLuint pos;
@@ -328,7 +327,6 @@ static void redraw(void *data);
 static s32 client_event_cb(s32 fd, u32 mask, void *data)
 {
 	static s32 status = 0;
-	static s32 buf_cnt = 2;
 	struct ipc_cmd cmd, s;
 	struct client_display *disp = data;
 	struct client_window *window = disp->window;
@@ -364,8 +362,8 @@ static s32 client_event_cb(s32 fd, u32 mask, void *data)
 		s.y = window->y;
 		s.w = window->w;
 		s.h = window->h;
-		s.stride = window->bufs[buf_cnt-1].stride;
-		s.fd = window->bufs[buf_cnt-1].fd;
+		s.stride = window->buf.stride;
+		s.fd = window->buf.fd;
 		printf("import dmabuf %ux%u\n", s.w, s.h);
 		/* import dma buffer */
 		clv_send(disp->sock, &s, sizeof(s));
@@ -373,26 +371,8 @@ static s32 client_event_cb(s32 fd, u32 mask, void *data)
 		break;
 	case 2:
 		printf("dmabuf imported 0x%08lX\n", (u64)cmd.buf);
-		window->bufs[buf_cnt-1].buf_handle = cmd.buf;
-		buf_cnt--;
-		if (buf_cnt > 0) {
-			status = 2;
-			s.status = status;
-			s.link = cmd.link;
-			s.surface = cmd.surface;
-			s.x = window->x;
-			s.y = window->y;
-			s.w = window->w;
-			s.h = window->h;
-			s.stride = window->bufs[buf_cnt].stride;
-			s.fd = window->bufs[buf_cnt].fd;
-			printf("import dmabuf %ux%u\n", s.w, s.h);
-			/* import dma buffer */
-			clv_send(disp->sock, &s, sizeof(s));
-			clv_send_fd(disp->sock, s.fd);
-		} else {
-			redraw(window);
-		}
+		window->buf.buf_handle = cmd.buf;
+		redraw(window);
 		break;
 	case 3:
 		if (status != 3) {
@@ -627,13 +607,11 @@ static struct client_window *create_client_window(struct client_display *disp,
 	win->y = 0;
 	win->w = w;
 	win->h = h;
-	for (i = 0; i < 2; i++) {
-		win->bufs[i].w = win->w;
-		win->bufs[i].stride = win->w * 4;
-		win->bufs[i].h = win->h;
-		ret = create_dmabuf(disp, &win->bufs[i]);
-		assert(ret == 0);
-	}
+	win->buf.w = win->w;
+	win->buf.stride = win->w * 4;
+	win->buf.h = win->h;
+	ret = create_dmabuf(disp, &win->buf);
+	assert(ret == 0);
 
 	assert(window_set_up_gl(win) == 0);
 
@@ -714,12 +692,13 @@ static void redraw(void *data)
 	struct dma_buf *buffer;
 	static s32 first = 1;
 	struct ipc_cmd s;
+	static s32 f = 1;
 
 	memset(&s, 0, sizeof(s));
 	assert(clv_event_source_timer_update(disp->repaint_event, 8, 667) ==0);
-	buffer = &window->bufs[window->back_buf];
+	buffer = &window->buf;
 	render(window, buffer);
-	glFinish();
+	glFlush();
 
 	if (!window->flip_occur) {
 		assert(clv_event_source_timer_update(disp->repaint_event, 8, 667) ==0);
@@ -729,9 +708,11 @@ static void redraw(void *data)
 	memcpy(&s, &window->cmd, sizeof(s));
 	s.status = 3;
 	s.buf = buffer->buf_handle;
-	printf("attach buffer 0x%08lX\n", (u64)buffer->buf_handle);
-	clv_send(disp->sock, &s, sizeof(s)); /* attach buffer */
-	window->back_buf = 1 - window->back_buf;
+	if (f) {
+		printf("attach buffer 0x%08lX\n", (u64)buffer->buf_handle);
+		clv_send(disp->sock, &s, sizeof(s)); /* attach buffer */
+		f--;
+	}
 	window->flip_occur--;
 	if (first) {
 		memcpy(&s, &window->cmd, sizeof(s));
@@ -899,7 +880,7 @@ static s32 client_cb(s32 fd, u32 mask, void *data)
 		clv_send(fd, &s, sizeof(s));
 		break;
 	case 3:
-		printf("attaching dma buf\n");
+		printf("<<<<<<<< server attaching dma buf >>>>>>>>>>>>\n");
 		buf = cmd.buf;
 		disp->c.renderer->attach_buffer(cmd.surface, buf);
 		break;
@@ -915,6 +896,7 @@ static s32 client_cb(s32 fd, u32 mask, void *data)
 		client->view->area.pos.y = cmd.y;
 		client->view->area.w = cmd.w;
 		client->view->area.h = cmd.h;
+		client->view->plane = &disp->c.primary_plane;
 		client->view->alpha = 1.0f;
 		list_add_tail(&client->view->link, &disp->c.views);
 		memcpy(&s, &cmd, sizeof(s));
@@ -981,6 +963,11 @@ static s32 server_repaint_cb(void *data)
 	return 0;
 }
 
+struct clv_mode mode = {
+      .w = 800,
+      .h = 600,
+};
+
 static struct server_display *create_server_display(u32 width, u32 height)
 {
 	struct server_display *disp;
@@ -1026,6 +1013,9 @@ static struct server_display *create_server_display(u32 width, u32 height)
 	disp->output.render_area.pos.y = 0;
 	disp->output.render_area.w = width;
 	disp->output.render_area.h = height;
+	disp->output.current_mode = &mode;
+	disp->output.current_mode->w = width;
+	disp->output.current_mode->h = height;
 	list_add_tail(&disp->output.link, &disp->c.outputs);
 	assert(disp->sock_event);
 	assert(renderer_create(&disp->c, NULL, 0, 0, disp->dpy, &vid) == 0);

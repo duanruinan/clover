@@ -23,6 +23,7 @@
 #include <errno.h>
 #include <getopt.h>
 #include <signal.h>
+#include <sys/socket.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <assert.h>
@@ -31,6 +32,8 @@
 #include <sys/stat.h>
 #include <clover_utils.h>
 #include <clover_log.h>
+#include <clover_ipc.h>
+#include <clover_shm.h>
 #include <clover_event.h>
 #include <clover_compositor.h>
 
@@ -38,16 +41,7 @@ s32 run_as_daemon = 0;
 char drm_node[] = "/dev/dri/card0";
 char *config_xml = NULL;
 
-struct clv_server {
-	struct clv_display *display;
-	struct clv_event_loop *loop;
-	struct clv_event_source *sig_int_source, *sig_tem_source;
-	struct clv_config *config;
-	struct clv_compositor *c;
-	struct clv_listener hpd_listener;
-	s32 count_outputs;
-	struct clv_output *outputs[8];
-} server;
+struct clv_server server;
 
 void usage(void)
 {
@@ -71,7 +65,6 @@ struct option server_options[] = {
 static void run_daemon(void)
 {
 	s32 pid;
-	s32 i;
 
 	signal(SIGTTOU, SIG_IGN);
 	signal(SIGTTIN, SIG_IGN);
@@ -94,7 +87,7 @@ static void run_daemon(void)
 		exit(1);
 	}
 
-	for (i = 0; i < NOFILE; close(i++));
+	//for (i = 0; i < NOFILE; close(i++));
 
 	chdir("/");
 
@@ -124,101 +117,393 @@ static s32 signal_event_proc(s32 signal_number, void *data)
 	return 0;
 }
 
-static void clv_server_output_destroy(struct clv_head *head)
+static void head_state_changed_cb(struct clv_listener *listener, void *data)
 {
-	struct clv_config *config = server.config;
-	struct clv_head_config *head_config = &config->heads[head->index];
-	struct clv_output_config *output_config = &head_config->encoder.output;
-	u32 index = output_config->index;
+	struct clv_compositor *c = data;
+	struct clv_backend *b = c->backend;
 	struct clv_output *output;
-
-	if (server.outputs[index]) {
-		output = server.outputs[index];
-		output->disable(output);
-		output->destroy(output);
-		server.outputs[index] = NULL;
-	}
-}
-
-static void clv_server_output_create(struct clv_head *head)
-{
-	struct clv_compositor *c = server.c;
-	u32 max_w, max_h, w, h, x, y;
-	struct clv_rect render_area;
-	struct clv_output_config *output_cfg;
-	struct clv_head_config *head_cfg;
+	struct clv_head *head;
 	s32 i;
 
-	x = y = 0;
 	for (i = 0; i < server.config->count_heads; i++) {
-		head_cfg = &server.config->heads[i];
-		output_cfg = &head_cfg->encoder.output;
-		if (head_cfg->index != head->index) {
-			if (server.outputs[i]) {
-				x += output_cfg->render_area.w;
+		if (!server.outputs[i]) {
+			output = b->output_create(c, &server.config->heads[i]);
+			if (!output) {
+				clv_err("failed to create output.");
+				continue;
 			}
+			server.outputs[i] = output;
+		}
+		output = server.outputs[i];
+		head = output->head;
+		if (!head->changed)
+			continue;
+
+		head->retrieve_modes(head);
+		if (head->connected) {
+			clv_compositor_choose_mode(output,
+						   &server.config->heads[i]);
+			output->enable(output,
+			  &server.config->heads[i].encoder.output.render_area);
+			clv_output_schedule_repaint(output, 2);
 		} else {
-			break;
+			output->disable(output);
 		}
 	}
-
-	if (i == server.config->count_heads)
-		return;
-
-	max_w = MIN(head_cfg->max_w, output_cfg->max_w);
-	max_h = MIN(head_cfg->max_h, output_cfg->max_h);
-	clv_debug("max_w = %u max_h = %u", max_w, max_h);
-
-	render_area.pos.x = x;
-	render_area.pos.y = y;
-
-	clv_compositor_choose_head_best_size(c, &w, &h, max_w, max_h,
-					     head->index);
-	clv_debug("The mode chosen: %ux%u", w, h);
-
-	render_area.w = w;
-	render_area.h = h;
-	server.outputs[output_cfg->index] = c->backend->output_create(c,
-								&render_area,
-								head_cfg);
-
-	clv_compositor_choose_current_mode(c, w, h, output_cfg->index);
-	server.outputs[output_cfg->index]->enable(
-		server.outputs[output_cfg->index]
-	);
 }
 
-static void heads_changed(struct clv_listener *listener, void *data)
+static s32 client_sock_cb(s32 fd, u32 mask, void *data)
 {
-	struct clv_head *last = NULL, *head;
-	struct clv_mode *mode;
-	struct clv_compositor *c = data;
+	struct clv_client_agent *agent = data;
+	struct clv_tlv *tlv;
+	u8 *rx_p;
+	u32 flag, length;
+	u64 id;
+	s32 ret, dmabuf_fd;
+	struct clv_surface_info si;
+	struct clv_view_info vi;
+	struct clv_bo_info bi;
+	struct clv_commit_info ci;
+	struct clv_buffer *buf;
 
-	do {
-		head = clv_compositor_enumerate_head(c, last);
-		if (head) {
-			last = head;
-			if (head->connected) {
-				mode = head->best_mode;
-				clv_notice("Head[%d]: %s %ux%u@%.1fMHz",
-					   head->index,
-					   "connected", mode->w, mode->h,
-					   mode->refresh / 1000.0f);
-				clv_server_output_create(head);
-			} else {
-				clv_notice("Head[%d]: %s", head->index,
-					   "disconnected");
-				clv_server_output_destroy(head);
+	ret = clv_recv(fd, agent->ipc_rx_buf, sizeof(*tlv) + sizeof(u32));
+	if (ret == -1) {
+		clv_err("client exit.");
+		client_agent_destroy(agent);
+		return -1;
+	} else if (ret < 0) {
+		clv_err("failed to receive client cmd");
+		client_agent_destroy(agent);
+		return -1;
+	}
+
+	tlv = (struct clv_tlv *)(agent->ipc_rx_buf + sizeof(u32));
+	length = tlv->length;
+	rx_p = agent->ipc_rx_buf + sizeof(u32) + sizeof(*tlv);
+	flag = *((u32 *)(agent->ipc_rx_buf));
+	ret = clv_recv(fd, rx_p, length);
+	if (ret == -1) {
+		clv_err("client exit.");
+		client_agent_destroy(agent);
+		return -1;
+	} else if (ret < 0) {
+		clv_err("failed to receive client cmd");
+		client_agent_destroy(agent);
+		return -1;
+	}
+
+	if (tlv->tag != CLV_TAG_WIN) {
+		clv_err("invalid TAG, not a win. 0x%08X", tlv->tag);
+		return -1;
+	}
+
+	if (flag & (1 << CLV_CMD_CREATE_SURFACE_SHIFT)) {
+		ret = clv_server_parse_create_surface_cmd(agent->ipc_rx_buf,
+							  &si);
+		if (ret < 0) {
+			clv_err("failed to parse surface create command from "
+				"agent 0x%08lX", (u64)agent);
+			id = 0;
+		} else {
+			clv_debug("parse surface create command ok.");
+			clv_debug("Surf: %d, %d,%d:%ux%u, %ux%u, %d,%d:%ux%u",
+				  si.is_opaque,
+				  si.damage.pos.x, si.damage.pos.y,
+				  si.damage.w, si.damage.h,
+				  si.width, si.height,
+				  si.opaque.pos.x, si.opaque.pos.y,
+				  si.opaque.w, si.opaque.h);
+			agent->surface = clv_surface_create(agent->c, &si,
+							    agent);
+			assert(agent->surface);
+			id = (u64)(agent->surface);
+			clv_debug("Surf created 0x%08lX", id);
+		}
+		clv_dup_surface_id_cmd(agent->surface_id_created_tx_cmd,
+				       agent->surface_id_created_tx_cmd_t,
+				       agent->surface_id_created_tx_len, id);
+		ret = clv_send(fd, agent->surface_id_created_tx_cmd,
+			       agent->surface_id_created_tx_len);
+		if (ret == -1) {
+			clv_err("client exit.");
+			client_agent_destroy(agent);
+			return -1;
+		} else if (ret < 0) {
+			clv_err("failed to send surface id");
+			client_agent_destroy(agent);
+			return -1;
+		}
+	} else if (flag & (1 << CLV_CMD_CREATE_VIEW_SHIFT)) {
+		ret = clv_server_parse_create_view_cmd(agent->ipc_rx_buf,
+						       &vi);
+		if (ret < 0) {
+			clv_err("failed to parse view create command from "
+				"agent 0x%08lX", (u64)agent);
+			id = 0;
+		} else {
+			clv_debug("parse view create command ok.");
+			clv_debug("View: %u, %d,%d:%ux%u, %f, 0x%08X, %u",
+				  vi.type, vi.area.pos.x, vi.area.pos.y,
+				  vi.area.w, vi.area.h,
+				  vi.alpha, vi.output_mask,
+				  vi.primary_output);
+			agent->view = clv_view_create(agent->surface, &vi);
+			assert(agent->view);
+			id = (u64)(agent->view);
+			clv_debug("View created 0x%08lX", id);
+		}
+		clv_dup_view_id_cmd(agent->view_id_created_tx_cmd,
+				    agent->view_id_created_tx_cmd_t,
+				    agent->view_id_created_tx_len, id);
+		ret = clv_send(fd, agent->view_id_created_tx_cmd,
+			       agent->view_id_created_tx_len);
+		if (ret == -1) {
+			clv_err("client exit.");
+			client_agent_destroy(agent);
+			return -1;
+		} else if (ret < 0) {
+			clv_err("failed to send view id");
+			client_agent_destroy(agent);
+			return -1;
+		}
+	} else if (flag & (1 << CLV_CMD_CREATE_BO_SHIFT)) {
+		ret = clv_server_parse_create_bo_cmd(agent->ipc_rx_buf, &bi);
+		if (ret < 0) {
+			clv_err("failed to parse bo create command from "
+				"agent 0x%08lX", (u64)agent);
+			id = 0;
+		} else {
+			clv_debug("parse bo create command ok.");
+			if (bi.type == CLV_BUF_TYPE_SHM) {
+				clv_debug("SHM BO create req: %u, %s, %u:%ux%u "
+					  "%lu", bi.fmt, bi.name, bi.width,
+					  bi.stride, bi.height, bi.surface_id);
+			} else if (bi.type == CLV_BUF_TYPE_DMA) {
+				clv_debug("DMA-BUF BO create req: %u, %u, "
+					  "%u:%ux%u %lu", bi.fmt,
+					  bi.internal_fmt, bi.width, bi.stride,
+					  bi.height, bi.surface_id);
+				dmabuf_fd = clv_recv_fd(fd);
+				clv_debug("receive dma buf fd %d", dmabuf_fd);
+				if (dmabuf_fd < 0) {
+					clv_err("dmabuf illegal %d", dmabuf_fd);
+					getchar();
+					client_agent_destroy(agent);
+					return -1;
+				}
+				buf = agent->c->renderer->import_dmabuf(
+					agent->c, dmabuf_fd,
+					bi.width, bi.height, bi.stride, bi.fmt,
+					bi.internal_fmt);
+				assert(buf);
+				list_add_tail(&buf->link, &agent->buffers);
+				id = (u64)buf;
+				clv_debug("DMA-BUF BO created 0x%08lX", id);
 			}
 		}
-	} while (head);
+		clv_dup_bo_id_cmd(agent->bo_id_created_tx_cmd,
+				  agent->bo_id_created_tx_cmd_t,
+				  agent->bo_id_created_tx_len, id);
+		ret = clv_send(fd, agent->bo_id_created_tx_cmd,
+			       agent->bo_id_created_tx_len);
+		if (ret == -1) {
+			clv_err("client exit.");
+			client_agent_destroy(agent);
+			return -1;
+		} else if (ret < 0) {
+			clv_err("failed to send bo id");
+			client_agent_destroy(agent);
+			return -1;
+		}
+	} else if (flag & (1 << CLV_CMD_COMMIT_SHIFT)) {
+		ret = clv_server_parse_commit_req_cmd(agent->ipc_rx_buf, &ci);
+		if (ret < 0) {
+			clv_err("failed to parse commit command from "
+				"agent 0x%08lX", (u64)agent);
+			id = 0;
+		} else {
+			clv_debug("parse commit command ok.");
+			clv_debug("Commit info: 0x%08lX, %d, %d,%d:%ux%u %d",
+				  ci.bo_id, ci.shown, ci.view_x, ci.view_y,
+				  ci.view_width, ci.view_height, ci.delta_z);
+
+			agent->c->renderer->attach_buffer(
+				agent->surface,
+				(struct clv_buffer *)(ci.bo_id));
+
+			agent->view->plane = &agent->c->primary_plane;
+			clv_view_schedule_repaint(agent->view);
+			clv_debug("************ add flip listener");
+			clv_surface_add_flip_listener(agent->surface);
+			id = 1;
+		}
+		clv_dup_commit_ack_cmd(agent->commit_ack_tx_cmd,
+				    agent->commit_ack_tx_cmd_t,
+				    agent->commit_ack_tx_len, id);
+		ret = clv_send(fd, agent->commit_ack_tx_cmd,
+			       agent->commit_ack_tx_len);
+		if (ret == -1) {
+			clv_err("client exit.");
+			client_agent_destroy(agent);
+			return -1;
+		} else if (ret < 0) {
+			clv_err("failed to send commit ack");
+			client_agent_destroy(agent);
+			return -1;
+		}
+	} else {
+		clv_err("unknown command 0x%08X", flag);
+		return -1;
+	}
+
+	return 0;
+#if 0
+	s32 ret, dmabuf_fd;
+	struct clv_buffer *buf;
+	static s32 f = 1;
+
+	memset(&r, 0, sizeof(r));
+	ret = clv_recv(fd, &r, sizeof(r));
+	if (ret == -1) {
+		clv_err("client exit.");
+		client_agent_destroy(agent);
+		return -1;
+	} else if (ret < 0) {
+		clv_err("failed to receive client cmd");
+	}
+
+	clv_info("receive from client %d stage %u cmd %u", fd, agent->stage,
+		 r.cmd);
+
+	switch (agent->stage) {
+	case CLV_CLIENT_STAGE_LINKUP:
+		switch (r.cmd) {
+		case CLV_CMD_CREATE_SURFACE:
+			clv_debug("receive surface create request surf: %ux%u "
+				  "view: %d,%d %ux%u",
+				  r.s.damage.w, r.s.damage.h,
+				  r.v.area.pos.x, r.v.area.pos.y,
+				  r.v.area.w, r.v.area.h);
+			agent->surface = clv_surface_create(agent->c, &r.s,
+							    agent);
+			assert(agent->surface);
+			memcpy(&s, &r, sizeof(s));
+			s.cmd = CLV_CMD_CREATE_SURFACE_ACK;
+			s.s.surface_id = (u64)(agent->surface);
+			clv_debug("surface created %lu", s.s.surface_id);
+			agent->view = clv_view_create(agent->surface, &r.v);
+			assert(agent->view);
+			s.v.view_id = (u64)(agent->view);
+			clv_debug("view created %lu", s.v.view_id);
+			clv_send(fd, &s, sizeof(s));
+			break;
+		case CLV_CMD_CREATE_DMA_BUF_BO:
+			clv_debug("receive dma bo create request");
+			memcpy(&s, &r, sizeof(s));
+			dmabuf_fd = clv_recv_fd(fd);
+			clv_debug("receive dma buf fd %d", dmabuf_fd);
+			buf = agent->c->renderer->import_dmabuf(
+				agent->c, dmabuf_fd, r.buf.width, r.buf.height,
+				r.buf.stride, r.buf.fmt,
+				r.buf.internal_fmt);
+			list_add_tail(&buf->link, &agent->buffers);
+			assert(buf);
+			s.buf_id = (u64)buf;
+			s.cmd = CLV_CMD_CREATE_DMA_BUF_BO_ACK;
+			clv_debug("send dma bo create ack");
+			clv_send(fd, &s, sizeof(s));
+			agent->stage = CLV_CLIENT_STAGE_WORKING;
+			break;
+		default:
+			break;
+		}
+		break;
+	case CLV_CLIENT_STAGE_WORKING:
+		switch (r.cmd) {
+		case CLV_CMD_CREATE_DMA_BUF_BO:
+			clv_debug("receive dma bo create request");
+			memcpy(&s, &r, sizeof(s));
+			dmabuf_fd = clv_recv_fd(fd);
+			clv_debug("receive dma buf fd %d", dmabuf_fd);
+			buf = agent->c->renderer->import_dmabuf(
+				agent->c, dmabuf_fd, r.buf.width, r.buf.height,
+				r.buf.stride, r.buf.fmt,
+				r.buf.internal_fmt);
+			list_add_tail(&buf->link, &agent->buffers);
+			assert(buf);
+			s.buf_id = (u64)buf;
+			s.cmd = CLV_CMD_CREATE_DMA_BUF_BO_ACK;
+			clv_debug("send dma bo create ack");
+			clv_send(fd, &s, sizeof(s));
+			agent->stage = CLV_CLIENT_STAGE_WORKING;
+			break;
+		case CLV_CMD_COMMIT:
+			clv_debug("receive commit request %lu", r.buf_id);
+			if (agent->f) {
+				agent->f--;
+				agent->c->renderer->attach_buffer(
+					agent->surface, (struct clv_buffer *)r.buf_id);
+			}
+			agent->view->plane = &agent->c->primary_plane;
+			clv_view_schedule_repaint(agent->view);
+			clv_debug("************ add flip listener");
+			clv_surface_add_flip_listener(agent->surface);
+			memcpy(&s, &r, sizeof(s));
+			s.cmd = CLV_CMD_COMMIT_ACK;
+			clv_debug("send commit ack");
+			clv_send(fd, &s, sizeof(s));
+			break;
+		default:
+			break;
+		}
+		break;
+	case CLV_CLIENT_STAGE_DESTROYING:
+		break;
+	default:
+		printf("unknown stage %u", agent->stage);
+		break;
+	}
+#endif
+
+	return 0;
+}
+
+static s32 server_sock_cb(s32 fd, u32 mask, void *data)
+{
+	struct clv_server *s = data;
+	s32 sock = clv_socket_accept(fd);
+	struct clv_client_agent *agent;
+
+	agent = client_agent_create(s, sock, client_sock_cb);
+	assert(agent);
+
+	//clv_socket_nonblock(sock);
+	clv_dup_linkup_cmd(s->linkid_created_ack_tx_cmd,
+			   s->linkid_created_ack_tx_cmd_t,
+			   s->linkid_created_ack_tx_len,
+			   (u64)agent);
+	clv_info("Send link id 0x%08lX", (u64)agent);
+	assert(clv_send(sock, s->linkid_created_ack_tx_cmd,
+			s->linkid_created_ack_tx_len) == 0);
+	clv_info("a new client connected. sock = %d", sock);
+	
+	return 0;
 }
 
 s32 main(s32 argc, char **argv)
 {
 	s32 ch;
+	struct clv_client_agent *agent, *next;
+	u32 n;
+
+	server.linkid_created_ack_tx_cmd_t
+		= clv_server_create_linkup_cmd(0, &n);
+	assert(server.linkid_created_ack_tx_cmd_t);
+	server.linkid_created_ack_tx_cmd = malloc(n);
+	assert(server.linkid_created_ack_tx_cmd);
+	server.linkid_created_ack_tx_len = n;
 	
-	server.hpd_listener.notify = heads_changed;
+	server.hpd_listener.notify = head_state_changed_cb;
 	while ((ch = getopt_long(argc, argv, server_short_options,
 				 server_options, NULL)) != -1) {
 		switch (ch) {
@@ -257,6 +542,20 @@ s32 main(s32 argc, char **argv)
 	server.loop = clv_display_get_event_loop(server.display);
 	assert(server.loop);
 
+	INIT_LIST_HEAD(&server.client_agents);
+	server.server_sock = clv_socket_cloexec(PF_LOCAL, SOCK_STREAM, 0);
+	assert(server.server_sock > 0);
+	//clv_socket_nonblock(server.server_sock);
+	unlink("/tmp/CLV_SERVER");
+	assert(clv_socket_bind_listen(server.server_sock,
+				      "/tmp/CLV_SERVER") == 0);
+	server.server_source = clv_event_loop_add_fd(server.loop,
+						     server.server_sock,
+						     CLV_EVT_READABLE,
+						     server_sock_cb,
+						     &server);
+	assert(server.server_source);
+
 	server.sig_int_source = clv_event_loop_add_signal(server.loop, SIGINT,
 							  signal_event_proc,
 							  server.display);
@@ -267,13 +566,23 @@ s32 main(s32 argc, char **argv)
 	server.c = clv_compositor_create(server.display);
 	clv_compositor_add_heads_changed_listener(server.c,
 						  &server.hpd_listener);
-
+	clv_compositor_schedule_heads_changed(server.c);
 	clv_display_run(server.display);
 
 	clv_compositor_destroy(server.c);
 
 	clv_event_source_remove(server.sig_int_source);
 	clv_event_source_remove(server.sig_tem_source);
+
+	list_for_each_entry_safe(agent, next, &server.client_agents, link) {
+		client_agent_destroy(agent);
+	}
+
+	if (server.server_source)
+		clv_event_source_remove(server.server_source);
+
+	if (server.server_sock > 0)
+		close(server.server_sock);
 	
 	clv_display_destroy(server.display);
 

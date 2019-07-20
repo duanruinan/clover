@@ -3,6 +3,7 @@
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <assert.h>
 #include <signal.h>
 #include <errno.h>
 #include <sys/epoll.h>
@@ -116,6 +117,13 @@ void clv_event_source_remove(struct clv_event_source *source)
 	list_add_tail(&source->link, &source->loop->destroy_list);
 }
 
+static void clv_event_idle_source_remove(struct clv_event_source *source)
+{
+	assert(source->fd < 0);
+	list_del(&source->link);
+	free(source);
+}
+
 struct clv_event_source * clv_event_loop_add_idle(struct clv_event_loop *loop,
 						  clv_event_loop_idle_cb_t cb,
 						  void *data)
@@ -145,7 +153,7 @@ void clv_event_loop_dispatch_idle(struct clv_event_loop *loop)
 				      struct clv_event_source_idle,
 				      base.link);
 		source->cb(source->base.data);
-		clv_event_source_remove(&source->base);
+		clv_event_idle_source_remove(&source->base);
 	}
 }
 
@@ -355,7 +363,9 @@ s32 clv_event_source_timer_update(struct clv_event_source *source,
 	its.it_value.tv_nsec = (ms % 1000) * 1000 * 1000 + us * 1000;
 
 	if (timerfd_settime(source->fd, 0, &its, NULL) < 0) {
-		clv_err("failed to timerfd_settime: %m");
+		clv_err("failed to timerfd_settime: %s fd = %d %ld %ld",
+			strerror(errno), source->fd, its.it_value.tv_sec,
+			its.it_value.tv_nsec);
 		return -1;
 	}
 

@@ -5,4 +5,5 @@ export TOOLCHAIN_BIN=$(pwd)/build/toolchain/arm64/rockchip/aarch64-rockchip-linu
 export TOOLCHAIN_SYSROOT=$(pwd)/build/toolchain/arm64/rockchip/aarch64-rockchip-linux-gnu/usr/aarch64-rockchip-linux-gnu/sysroot
 
 make -C build RPATH=`pwd` PLATFORM=RK3399 CLV_DEBUG=Y
+# make -C build RPATH=`pwd` PLATFORM=RK3399
 

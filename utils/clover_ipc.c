@@ -134,7 +134,7 @@ s32 clv_send(s32 sock, void *buf, s32 sz)
 	s32 ret;
 
 	while (byts_to_wr) {
-		ret = send(sock, p, byts_to_wr, 0);
+		ret = send(sock, p, byts_to_wr, MSG_NOSIGNAL);
 		if (ret < 0) {
 			if (errno == EINTR) {
 				continue;

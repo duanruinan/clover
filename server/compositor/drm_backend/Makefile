@@ -17,6 +17,7 @@ CLOVER_UTILS_H += $(RPATH)/utils/clover_region.h
 CLOVER_UTILS_H += $(RPATH)/utils/clover_shm.h
 CLOVER_UTILS_H += $(RPATH)/utils/clover_signal.h
 CLOVER_UTILS_H += $(RPATH)/utils/clover_ipc.h
+CLOVER_UTILS_H += $(RPATH)/utils/clover_protocal.h
 
 PLATFORM_CFLAGS += -I${TOOLCHAIN_SYSROOT}/usr/include/libdrm
 PLATFORM_LDFLAGS += -ldrm -lgbm -lrt -ludev
