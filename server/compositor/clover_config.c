@@ -71,7 +71,7 @@ static char *load_file(const char *xml)
 	
 	byts_to_rd = len;
 	lseek(fd, 0, SEEK_SET);
-	buf = malloc(len);
+	buf = malloc(len+1);
 	if (!buf) {
 		close(fd);
 		return NULL;
