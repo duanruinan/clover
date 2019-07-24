@@ -38,8 +38,10 @@
 #include <clover_region.h>
 #include <clover_compositor.h>
 
-static u8 drm_dbg = 16;
-static u8 gbm_dbg = 16;
+static u8 drm_dbg = 15;
+static u8 gbm_dbg = 15;
+static u8 timer_dbg = 15;
+static u8 ps_dbg = 15;
 
 struct clv_renderer *gl_renderer = NULL;
 
@@ -93,6 +95,58 @@ struct clv_renderer *gl_renderer = NULL;
 
 #define gbm_err(fmt, ...) do { \
 	clv_err("[GBM ] " fmt, ##__VA_ARGS__); \
+} while (0);
+
+#define ps_debug(fmt, ...) do { \
+	if (ps_dbg >= 3) { \
+		clv_debug("[PS  ] " fmt, ##__VA_ARGS__); \
+	} \
+} while (0);
+
+#define ps_info(fmt, ...) do { \
+	if (ps_dbg >= 2) { \
+		clv_info("[PS  ] " fmt, ##__VA_ARGS__); \
+	} \
+} while (0);
+
+#define ps_notice(fmt, ...) do { \
+	if (ps_dbg >= 1) { \
+		clv_notice("[PS  ] " fmt, ##__VA_ARGS__); \
+	} \
+} while (0);
+
+#define ps_warn(fmt, ...) do { \
+	clv_warn("[PS  ] " fmt, ##__VA_ARGS__); \
+} while (0);
+
+#define ps_err(fmt, ...) do { \
+	clv_err("[PS  ] " fmt, ##__VA_ARGS__); \
+} while (0);
+
+#define timer_debug(fmt, ...) do { \
+	if (timer_dbg >= 3) { \
+		clv_debug("[TS  ] " fmt, ##__VA_ARGS__); \
+	} \
+} while (0);
+
+#define timer_info(fmt, ...) do { \
+	if (timer_dbg >= 2) { \
+		clv_info("[TS  ] " fmt, ##__VA_ARGS__); \
+	} \
+} while (0);
+
+#define timer_notice(fmt, ...) do { \
+	if (timer_dbg >= 1) { \
+		clv_notice("[TS  ] " fmt, ##__VA_ARGS__); \
+	} \
+} while (0);
+
+#define timer_warn(fmt, ...) do { \
+	clv_warn("[TS  ] " fmt, ##__VA_ARGS__); \
+} while (0);
+
+#define timer_err(fmt, ...) do { \
+	clv_err("[TS  ] " fmt, ##__VA_ARGS__); \
 } while (0);
 
 struct drm_backend;
@@ -515,7 +569,7 @@ static void drm_output_update_complete(struct drm_output *output,
 
 	ts.tv_sec = sec;
 	ts.tv_nsec = usec * 1000;
-	drm_debug("[TIMER][OUTPUT: %u] now: %ld, %d",
+	timer_debug("[OUTPUT: %u] now: %ld, %d",
 		  output->index, ts.tv_sec, usec);
 	clv_output_finish_frame(&output->base, &ts);
 }
@@ -737,7 +791,7 @@ static void drm_plane_state_free(struct drm_plane_state *state, s32 force)
 	if (!state)
 		return;
 
-	drm_debug("[STATE] plane state free %p", state);
+	ps_debug("plane state free %p", state);
 	list_del(&state->link);
 	INIT_LIST_HEAD(&state->link);
 	state->output_state = NULL;
@@ -751,7 +805,7 @@ static void drm_output_state_free(struct drm_output_state *state)
 {
 	struct drm_plane_state *ps, *next;
 
-	drm_debug("[STATE] output state free");
+	ps_debug("output state free");
 	if (!state)
 		return;
 
@@ -768,7 +822,7 @@ static void drm_output_assign_state(struct drm_output_state *state,s32 is_async)
 	struct drm_output *output = state->output;
 	struct drm_plane_state *plane_state;
 
-	drm_debug("[STATE] output assign state %p", output);
+	ps_debug("output assign state %p", output);
 	assert(!output->state_last);
 
 	if (is_async)
@@ -975,9 +1029,9 @@ static s32 drm_pending_state_apply_atomic(struct drm_pending_state *ps,
 	}
 
 	clock_gettime(b->c->clk_id, &now);
-	drm_debug("[TIMER] AtomicCommit [%s] now: %ld,%ld",
-		  flags & DRM_MODE_ATOMIC_ALLOW_MODESET ? "MODSET" : "NORMAL",
-		  now.tv_sec, now.tv_nsec / 1000000l);
+	timer_debug("AtomicCommit [%s] now: %ld,%ld",
+		    flags & DRM_MODE_ATOMIC_ALLOW_MODESET ? "MODSET" : "NORMAL",
+		    now.tv_sec, now.tv_nsec / 1000000l);
 	ret = drmModeAtomicCommit(b->fd, req, flags, b);
 	drm_debug("[atomic] drmModeAtomicCommit");
 
@@ -1014,7 +1068,7 @@ static struct drm_pending_state *drm_pending_state_alloc(struct drm_backend *b)
 {
 	struct drm_pending_state *ps;
 
-	drm_debug("[STATE] ------ pending state alloc");
+	ps_debug("pending state alloc");
 	ps = calloc(1, sizeof(*(ps)));
 	if (!ps)
 		return NULL;
@@ -1029,7 +1083,7 @@ static void drm_pending_state_free(struct drm_pending_state *ps)
 {
 	struct drm_output_state *output_state, *tmp;
 
-	drm_debug("[STATE] ------ pending state free");
+	ps_debug("pending state free");
 	if (!ps)
 		return;
 
@@ -1370,7 +1424,7 @@ static void drm_plane_state_put_back(struct drm_plane_state *state)
 	struct drm_output_state *state_output;
 	struct drm_plane *plane;
 
-	drm_debug("[STATE] plane state put back");
+	ps_debug("plane state put back");
 	if (!state)
 		return;
 
@@ -1659,7 +1713,7 @@ static struct drm_plane_state *drm_plane_state_alloc(
 		list_add_tail(&state->link, &state_output->plane_states);
 	else
 		INIT_LIST_HEAD(&state->link);
-	drm_debug("[STATE] plane state alloc for plane [%u] %p", plane->index,
+	ps_debug("plane state alloc for plane [%u] %p", plane->index,
 		  state);
 	return state;
 }
@@ -1990,7 +2044,7 @@ static struct drm_plane_state *drm_output_state_get_existing_plane(
 {
 	struct drm_plane_state *state;
 
-	drm_debug("[STATE] get existing plane[%u] state from output[%u] state",
+	ps_debug("get existing plane[%u] state from output[%u] state",
 		  plane->index, output_state->output->index);
 	list_for_each_entry(state, &output_state->plane_states, link) {
 		if (state->plane == plane)
@@ -2006,7 +2060,7 @@ static struct drm_plane_state *drm_output_state_get_plane(
 {
 	struct drm_plane_state *state;
 
-	drm_debug("[STATE] get plane[%u] state from output[%u] state",
+	ps_debug("get plane[%u] state from output[%u] state",
 		  plane->index, output_state->output->index);
 	state = drm_output_state_get_existing_plane(output_state, plane);
 	if (state)
@@ -2020,8 +2074,8 @@ static struct drm_output_state *drm_output_state_alloc(
 {
 	struct drm_output_state *state = calloc(1, sizeof(*state));
 
-	drm_debug("------> alloc output state.. output->index = %u, %p",
-		  output->index, ps);
+	ps_debug("------> alloc output state.. output->index = %u, %p",
+		 output->index, ps);
 	assert(state);
 	state->output = output;
 	state->dpms = CLV_DPMS_OFF;
@@ -2036,10 +2090,9 @@ static struct drm_output_state *drm_output_state_alloc(
 	if (ps) {
 		struct drm_output_state *o;
 
-		clv_debug("output in ps: %p", ps);
+		ps_debug("output in ps: %p", ps);
 		list_for_each_entry(o, &ps->output_states, link)
-			clv_printf("%u ", o->output->index);
-		clv_printf("\n");
+			ps_debug("\t%u", o->output->index);
 	}
 	drm_debug("------ %p", state);
 	return state;
@@ -2053,9 +2106,9 @@ static struct drm_output_state *drm_output_state_dup(
 	struct drm_output_state *dst = calloc(1, sizeof(*dst));
 	struct drm_plane_state *state;
 
-	drm_debug("------> dup output state.. output->index = %u, %p src: %p",
-		  src->output->index, ps, src);
-	drm_debug("src->pending_state = %p", src->pending_state);
+	ps_debug("------> dup output state.. output->index = %u, %p src: %p",
+		 src->output->index, ps, src);
+	ps_debug("src->pending_state = %p", src->pending_state);
 	assert(dst);
 
 	*dst = *src;
@@ -2063,10 +2116,9 @@ static struct drm_output_state *drm_output_state_dup(
 	if (ps) {
 		struct drm_output_state *o;
 
-		clv_debug("output in ps: %p", ps);
+		ps_debug("output in ps: %p", ps);
 		list_for_each_entry(o, &ps->output_states, link)
-			clv_printf("%u ", o->output->index);
-		clv_printf("\n");
+			ps_debug("\t%u", o->output->index);
 	}
 
 	dst->pending_state = ps;
@@ -2088,16 +2140,15 @@ static struct drm_output_state *drm_output_state_dup(
 			(void)drm_plane_state_dup(state, dst);
 	}
 
-	drm_debug("src->pending_state = %p", src->pending_state);
+	ps_debug("src->pending_state = %p", src->pending_state);
 	if (ps) {
 		struct drm_output_state *o;
 
-		clv_debug("output in ps: %p", ps);
+		ps_debug("output in ps: %p", ps);
 		list_for_each_entry(o, &ps->output_states, link)
-			clv_printf("%u ", o->output->index);
-		clv_printf("\n");
+			ps_debug("\t%u", o->output->index);
 	}
-	drm_debug("------ %p", dst);
+	ps_debug("------ %p", dst);
 	return dst;
 }
 
@@ -2334,12 +2385,15 @@ struct clv_backend *drm_backend_create(struct clv_compositor *c)
 	b->base.output_create = drm_output_create;
 
 	renderer_create(c, (s32 *)&b->gbm_format, 1, 1, b->gbm, &vid);
+	set_renderer_dbg(0);
 	assert(c->renderer);
 	gl_renderer = c->renderer;
 	drm_debug("DRM Backend created.");
 
 	drm_dbg = 0;
 	gbm_dbg = 0;
+	timer_dbg = 0;
+	ps_dbg = 0;
 
 	return &b->base;
 
@@ -2348,9 +2402,11 @@ error:
 	return NULL;
 }
 
-void drm_set_dbg(u8 flag)
+void drm_set_dbg(u32 flags)
 {
-	drm_dbg = flag & 0x0F;
-	gbm_dbg = (flag & 0xF0) >> 4;
+	drm_dbg = flags & 0x0F;
+	gbm_dbg = (flags >> 4) & 0x0F;
+	ps_dbg = (flags >> 8) & 0x0F;
+	timer_dbg = (flags >> 12) & 0x0F;
 }
 

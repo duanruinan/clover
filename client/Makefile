@@ -21,17 +21,23 @@ CLOVER_UTILS_H += $(RPATH)/utils/clover_protocal.h
 PLATFORM_CFLAGS += -I${TOOLCHAIN_SYSROOT}/usr/include/libdrm
 PLATFORM_LDFLAGS += -lgbm -lEGL -lGLESv2
 
-all: clover_simple_client
+all: clover_simple_client clover_shell
 
 clover_simple_client: main.o \
 		$(RPATH)/utils/libclover_utils.so
 	$(CC) $< $(LDFLAGS) $(PLATFORM_LDFLAGS) -o $@
 
-main.o: main.c $(RPATH)/server/compositor/clover_compositor.h \
-		$(CLOVER_UTILS_H)
+main.o: main.c $(CLOVER_UTILS_H)
+	$(CC) -c $< -I. $(CFLAGS) $(PLATFORM_CFLAGS) -o $@
+
+clover_shell: clover_shell.o \
+		$(RPATH)/utils/libclover_utils.so
+	$(CC) $< $(LDFLAGS) -o $@
+
+clover_shell.o: clover_shell.c $(CLOVER_UTILS_H)
 	$(CC) -c $< -I. $(CFLAGS) $(PLATFORM_CFLAGS) -o $@
 
 clean:
 	-@rm -f *.o
-	-@rm -f clover_simple_client
+	-@rm -f clover_simple_client clover_shell
 

@@ -18,6 +18,8 @@ s32 clv_shm_init(struct clv_shm *shm, const char *shm_id, u32 size, s32 creator)
 	strcpy(shm->name, shm_id);
 	shm->sz = size;
 
+	printf("shm->name = %s size = %u creator = %d %s\n", shm->name, size,
+		creator, strerror(errno));
 	shm->creator = creator;
 	if (shm->creator)
 		shm->fd = shm_open(shm->name,
@@ -32,9 +34,11 @@ s32 clv_shm_init(struct clv_shm *shm, const char *shm_id, u32 size, s32 creator)
 	if (clv_set_cloexec_or_close(shm->fd) < 0)
 		clv_warn("failed to set shm fd cloexec.");
 
+	printf("fd = %d, %s\n", shm->fd, strerror(errno));
 	ftruncate(shm->fd, shm->sz);
 	shm->map = mmap(NULL, shm->sz, PROT_READ | PROT_WRITE,
 			MAP_SHARED, shm->fd, 0);
+	printf("sz = %u errno = %s\n", shm->sz, strerror(errno));
 
 	if (!shm->map)
 		return -errno;

@@ -252,7 +252,7 @@ struct clv_backend {
 					     struct clv_head_config *head_cfg);
 };
 
-void set_backend_dbg(u8 flag);
+void set_scanout_dbg(u32 flag);
 
 #define MODE_PREFERRED 0x00000001
 
@@ -365,7 +365,7 @@ struct clv_server {
 s32 renderer_create(struct clv_compositor *c, s32 *formats, s32 count_fmts,
 		    s32 no_winsys, void *native_window, s32 *vid);
 
-void set_renderer_dbg(u8 flag);
+void set_renderer_dbg(u32 flag);
 
 #define NSEC_PER_SEC 1000000000
 static inline void timespec_sub(struct timespec *r,
@@ -457,6 +457,9 @@ struct clv_client_agent *client_agent_create(
 	s32 sock,
 	s32 (*client_sock_cb)(s32 fd, u32 mask, void *data));
 void client_agent_destroy(struct clv_client_agent *agent);
+struct clv_buffer *shm_buffer_create(struct clv_bo_info *bi);
+void shm_buffer_destroy(struct clv_buffer *buffer);
+void set_compositor_dbg(u32 flags);
 
 #endif
 

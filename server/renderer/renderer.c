@@ -9,7 +9,7 @@ static void *lib_handle = NULL;
 
 static s32 (*create)(struct clv_compositor *c, s32 *formats, s32 count_fmts,
 		     s32 no_winsys, void *native_window, s32 *vid) = NULL;
-static void (*set_dbg)(u8 flag) = NULL;
+static void (*set_dbg)(u32 flag) = NULL;
 
 static void load_lib(void)
 {
@@ -46,7 +46,7 @@ s32 renderer_create(struct clv_compositor *c, s32 *formats, s32 count_fmts,
 	return create(c, formats, count_fmts, no_winsys, native_window, vid);
 }
 
-void set_renderer_dbg(u8 flag)
+void set_renderer_dbg(u32 flag)
 {
 	if (!create)
 		load_lib();

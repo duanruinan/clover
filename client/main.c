@@ -89,9 +89,23 @@ struct dma_buf {
 	u64 id;
 };
 
+struct shm_buf {
+	u32 w, h;
+	u32 stride;
+	struct clv_shm shm;
+	u64 id;
+};
+
 struct dmabuf_window;
+struct shm_window;
+
+enum client_display_type {
+	DISP_TYPE_DMABUF = 0,
+	DISP_TYPE_SHM,
+};
 
 struct client_display {
+	enum client_display_type type;
 	struct clv_event_loop *loop;
 	struct clv_event_source *sock_event;
 	struct clv_event_source *repaint_event;
@@ -99,7 +113,8 @@ struct client_display {
 
 	s32 exit;
 
-	struct dmabuf_window *window;
+	struct dmabuf_window *dmabuf_window;
+	struct shm_window *shm_window;
 
 	s32 sock;
 	
@@ -115,6 +130,47 @@ struct client_display {
 		s32 drm_fd;
 		struct gbm_device *device;
 	} gbm;
+};
+
+struct shm_window {
+	struct client_display *disp;
+	s32 x, y;
+	u32 w, h;
+	enum clv_pixel_fmt pixel_fmt;
+	struct shm_buf buf[2];
+
+	s32 flip_pending;
+	s32 back_buf;
+
+	u8 *ipc_rx_buf;
+	u32 ipc_rx_buf_sz;
+
+	struct clv_surface_info s;
+	struct clv_view_info v;
+	struct clv_bo_info b;
+	struct clv_commit_info c;
+
+	u8 *create_surface_tx_cmd_t;
+	u8 *create_surface_tx_cmd;
+	u32 create_surface_tx_len;
+
+	u8 *create_view_tx_cmd_t;
+	u8 *create_view_tx_cmd;
+	u32 create_view_tx_len;
+
+	u8 *create_bo_tx_cmd_t;
+	u8 *create_bo_tx_cmd;
+	u32 create_bo_tx_len;
+
+	u8 *commit_tx_cmd_t;
+	u8 *commit_tx_cmd;
+	u32 commit_tx_len;
+
+	u8 *terminate_tx_cmd_t;
+	u8 *terminate_tx_cmd;
+	u32 terminate_tx_len;
+
+	u64 link_id;
 };
 
 struct dmabuf_window {
@@ -163,12 +219,12 @@ struct dmabuf_window {
 	u64 link_id;
 };
 
-static void destroy_display(struct client_display *disp)
+static void destroy_dmabuf_display(struct client_display *disp)
 {
 	if (disp->gbm.device)
 		gbm_device_destroy(disp->gbm.device);
 
-	if (disp->gbm.drm_fd >= 0)
+	if (disp->gbm.drm_fd > 0)
 		close(disp->gbm.drm_fd);
 
 	if (disp->egl.context != EGL_NO_CONTEXT)
@@ -176,6 +232,12 @@ static void destroy_display(struct client_display *disp)
 
 	if (disp->egl.display != EGL_NO_DISPLAY)
 		eglTerminate(disp->egl.display);
+}
+
+static void destroy_display(struct client_display *disp)
+{
+	if (disp->type == DISP_TYPE_DMABUF)
+		destroy_dmabuf_display(disp);
 
 	if (disp->sock > 0) {
 		close(disp->sock);
@@ -385,7 +447,7 @@ error:
 	return -1;
 }
 
-static struct client_display *create_client_display(const char *node)
+static struct client_display *create_dmabuf_display(const char *node)
 {
 	struct client_display *disp;
 
@@ -393,6 +455,7 @@ static struct client_display *create_client_display(const char *node)
 	if (!disp)
 		return NULL;
 
+	disp->type = DISP_TYPE_DMABUF;
 	disp->gbm.drm_fd = -1;
 	disp->sock = clv_socket_cloexec(PF_LOCAL, SOCK_STREAM, 0);
 	assert(disp->sock > 0);
@@ -411,6 +474,31 @@ error:
 	if (disp)
 		destroy_display(disp);
 	return NULL;
+}
+
+static struct client_display *create_shm_display(void)
+{
+	struct client_display *disp;
+
+	disp = calloc(1, sizeof(*disp));
+	if (!disp)
+		return NULL;
+
+	disp->type = DISP_TYPE_SHM;
+	disp->sock = clv_socket_cloexec(PF_LOCAL, SOCK_STREAM, 0);
+	assert(disp->sock > 0);
+	//clv_socket_nonblock(disp->sock);
+	assert(clv_socket_connect(disp->sock, "/tmp/CLV_SERVER") == 0);
+	printf("create client display ok.\n");
+	return disp;
+}
+
+static struct client_display *create_client_display(const char *hwaccel_node)
+{
+	if (hwaccel_node)
+		return create_dmabuf_display(hwaccel_node);
+	else
+		return create_shm_display();
 }
 
 static const char *egl_strerror(EGLint err)
@@ -533,6 +621,16 @@ static s32 create_dmabuf(struct client_display *disp, struct dma_buf *buffer)
 	return 0;
 }
 
+static void create_shmbuf(struct client_display *disp, struct shm_buf *buffer,
+			  u32 index)
+{
+	char name[CLV_BUFFER_NAME_LEN];
+
+	memset(name, 0, CLV_BUFFER_NAME_LEN);
+	sprintf(name, "simple_client-%d-%u", getpid(), index);
+	clv_shm_init(&buffer->shm, name, buffer->stride * buffer->h, 1);
+}
+
 static const char *vert_shader_text =
 	"uniform float offset;\n"
 	"attribute vec4 pos;\n"
@@ -620,7 +718,7 @@ static s32 window_set_up_gl(struct dmabuf_window *window)
 	return window->gl.program == 0;
 }
 
-static struct dmabuf_window *create_client_window(struct client_display *disp,
+static struct dmabuf_window *create_dmabuf_window(struct client_display *disp,
 						  s32 x, s32 y, u32 w, u32 h)
 {
 	s32 i, ret;
@@ -720,6 +818,104 @@ static struct dmabuf_window *create_client_window(struct client_display *disp,
 	return win;
 }
 
+static struct shm_window *create_shmbuf_window(struct client_display *disp,
+					       s32 x, s32 y, u32 w, u32 h)
+{
+	struct shm_window *win;
+	u32 n, i;
+
+	win = calloc(1, sizeof(*win));
+	if (!win)
+		return NULL;
+
+	win->disp = disp;
+
+	win->x = x;
+	win->y = y;
+	win->w = w;
+	win->h = h;
+	for (i = 0; i < 2; i++) {
+		win->buf[i].w = win->w;
+		win->buf[i].stride = win->w * 4;
+		win->buf[i].h = win->h;
+		create_shmbuf(disp, &win->buf[i], i);
+	}
+
+	win->flip_pending = 0;
+	win->back_buf = 0;
+
+	win->ipc_rx_buf_sz = 32 * 1024;
+	win->ipc_rx_buf = malloc(win->ipc_rx_buf_sz);
+	if (!win->ipc_rx_buf)
+		return NULL;
+
+	win->s.is_opaque = 1;
+	win->s.damage.pos.x = 0;
+	win->s.damage.pos.y = 0;
+	win->s.damage.w = win->w;
+	win->s.damage.h = win->h;
+	win->s.opaque.pos.x = 0;
+	win->s.opaque.pos.y = 0;
+	win->s.opaque.w = win->w;
+	win->s.opaque.h = win->h;
+	win->s.width = win->w;
+	win->s.height = win->h;
+	win->v.type = CLV_VIEW_TYPE_PRIMARY;
+	win->v.area.pos.x = win->x;
+	win->v.area.pos.y = win->y;
+	win->v.area.w = win->w;
+	win->v.area.h = win->h;
+	win->v.alpha = 1.0f;
+	win->v.output_mask = 0x03;
+	win->v.primary_output = output_index;
+	win->b.type = CLV_BUF_TYPE_SHM;
+	win->b.fmt = CLV_PIXEL_FMT_ARGB8888;
+	win->b.count_planes = 1;
+	win->b.internal_fmt = 0;
+	win->b.width = win->w;
+	win->b.stride = win->w * 4;
+	win->b.height = win->h;
+	win->c.shown = 1;
+	win->c.view_x = win->x;
+	win->c.view_y = win->y;
+	win->c.view_width = win->w;
+	win->c.view_height = win->h;
+	win->c.delta_z = 0;
+
+	win->create_surface_tx_cmd_t = clv_client_create_surface_cmd(&win->s,
+								     &n);
+	assert(win->create_surface_tx_cmd_t);
+	win->create_surface_tx_cmd = malloc(n);
+	assert(win->create_surface_tx_cmd);
+	win->create_surface_tx_len = n;
+
+	win->create_view_tx_cmd_t = clv_client_create_view_cmd(&win->v, &n);
+	assert(win->create_view_tx_cmd_t);
+	win->create_view_tx_cmd = malloc(n);
+	assert(win->create_view_tx_cmd);
+	win->create_view_tx_len = n;
+
+	win->create_bo_tx_cmd_t = clv_client_create_bo_cmd(&win->b, &n);
+	assert(win->create_bo_tx_cmd_t);
+	win->create_bo_tx_cmd = malloc(n);
+	assert(win->create_bo_tx_cmd);
+	win->create_bo_tx_len = n;
+
+	win->commit_tx_cmd_t = clv_client_create_commit_req_cmd(&win->c, &n);
+	assert(win->commit_tx_cmd_t);
+	win->commit_tx_cmd = malloc(n);
+	assert(win->commit_tx_cmd);
+	win->commit_tx_len = n;
+
+	win->terminate_tx_cmd_t = clv_client_create_destroy_cmd(0, &n);
+	assert(win->terminate_tx_cmd_t);
+	win->terminate_tx_cmd = malloc(n);
+	assert(win->terminate_tx_cmd);
+	win->terminate_tx_len = n;
+
+	return win;
+}
+
 static void run_client_event_loop(struct client_display *disp)
 {
 	while (!disp->exit) {
@@ -736,7 +932,7 @@ static void run_client_event_loop(struct client_display *disp)
  *        |     |
  *    red +-----+ blue
  */
-static void render(struct dmabuf_window *window, struct dma_buf *buffer)
+static void render_gpu(struct dmabuf_window *window, struct dma_buf *buffer)
 {
 	/* Complete a movement iteration in 5000 ms. */
 	static const u64 iteration_ms = 15000;
@@ -794,8 +990,8 @@ static void dmabuf_redraw(void *data)
 
 	assert(clv_event_source_timer_update(disp->repaint_event, 8, 0) == 0);
 	buffer = &window->buf[window->back_buf];
-	render(window, buffer);
 
+	render_gpu(window, buffer);
 	if (window->flip_pending) {
 		assert(clv_event_source_timer_update(disp->repaint_event, 2, 667) ==0);
 //		clv_debug("not commit");
@@ -811,12 +1007,67 @@ static void dmabuf_redraw(void *data)
 	clv_send(disp->sock, window->commit_tx_cmd, window->commit_tx_len);
 }
 
+static void render_cpu(struct shm_window *window, struct shm_buf *buffer)
+{
+	u32 i, *pixel;
+	static u32 c = 0x80FF00;
+
+	pixel = (u32 *)(buffer->shm.map);
+//	printf("render_cpu %p >>>>>>>>>>>> 0x%08X\n", pixel,
+//		0xFF000000 | c);
+	for (i = 0; i < buffer->shm.sz / 4; i++) {
+		pixel[i] = (0xFF000000 | c);
+	}
+	c -= 0x001000;
+	if (c <= 0x000000)
+		c = 0x80F000;
+}
+
+static void shmbuf_redraw(void *data)
+{
+	struct shm_window *window = data;
+	struct client_display *disp = window->disp;
+	struct shm_buf *buffer;
+
+	assert(clv_event_source_timer_update(disp->repaint_event, 8, 0) == 0);
+	buffer = &window->buf[window->back_buf];
+
+	if (window->flip_pending) {
+		assert(clv_event_source_timer_update(disp->repaint_event, 2, 667) ==0);
+//		clv_debug("not commit");
+		return;
+	}
+	render_cpu(window, buffer);
+
+	window->c.bo_id = buffer->id;
+	window->c.bo_damage.pos.x = buffer->w / 3;
+	window->c.bo_damage.pos.y = buffer->h / 3;
+	window->c.bo_damage.w = buffer->w / 3;
+	window->c.bo_damage.h = buffer->h / 3;
+
+	clv_dup_commit_req_cmd(window->commit_tx_cmd, window->commit_tx_cmd_t,
+			       window->commit_tx_len, &window->c);
+	//clv_debug("commit %lu", buffer->id);
+	window->flip_pending = 1;
+	window->back_buf = 1 - window->back_buf;
+	clv_send(disp->sock, window->commit_tx_cmd, window->commit_tx_len);
+}
+
 static s32 dmabuf_repaint_cb(void *data)
 {
 	struct client_display *disp = data;
-	struct dmabuf_window *window = disp->window;
+	struct dmabuf_window *window = disp->dmabuf_window;
 
 	dmabuf_redraw(window);
+	return 0;
+}
+
+static s32 shm_repaint_cb(void *data)
+{
+	struct client_display *disp = data;
+	struct shm_window *window = disp->shm_window;
+
+	shmbuf_redraw(window);
 	return 0;
 }
 
@@ -830,11 +1081,11 @@ static s32 collect_cb(void *data)
 	return 0;
 }
 
-static s32 client_event_cb(s32 fd, u32 mask, void *data)
+static s32 dmabuf_client_event_cb(s32 fd, u32 mask, void *data)
 {
 	s32 ret;
 	struct client_display *display = data;
-	struct dmabuf_window *window = display->window;
+	struct dmabuf_window *window = display->dmabuf_window;
 	struct clv_tlv *tlv;
 	u8 *rx_p;
 	u32 flag, length;
@@ -987,9 +1238,12 @@ static s32 client_event_cb(s32 fd, u32 mask, void *data)
 			} else {
 				window->buf[1].id = id;
 				clv_debug("create bo[1] ok, bo_id: 0x%08lX",
-					  window->buf[0].id);
+					  window->buf[1].id);
 				clv_debug("Start to draw.");
-				dmabuf_redraw(window);
+				if (window->b.type == CLV_BUF_TYPE_DMA)
+					dmabuf_redraw(window);
+				else
+					shmbuf_redraw(window);
 				clv_event_source_timer_update(
 					display->collect_event, 1000, 0);
 			}
@@ -1017,6 +1271,217 @@ static s32 client_event_cb(s32 fd, u32 mask, void *data)
 	return 0;
 }
 
+static s32 shm_client_event_cb(s32 fd, u32 mask, void *data)
+{
+	s32 ret;
+	struct client_display *display = data;
+	struct shm_window *window = display->shm_window;
+	struct clv_tlv *tlv;
+	u8 *rx_p;
+	u32 flag, length;
+	u64 id;
+	static s32 bo_0_created = 0;
+
+	ret = clv_recv(fd, window->ipc_rx_buf, sizeof(*tlv) + sizeof(u32));
+	if (ret == -1) {
+		clv_err("server exit.");
+		return -1;
+	} else if (ret < 0) {
+		clv_err("failed to receive server cmd");
+	}
+	tlv = (struct clv_tlv *)(window->ipc_rx_buf + sizeof(u32));
+	length = tlv->length;
+	rx_p = window->ipc_rx_buf + sizeof(u32) + sizeof(*tlv);
+	flag = *((u32 *)(window->ipc_rx_buf));
+	ret = clv_recv(fd, rx_p, length);
+	if (ret == -1) {
+		clv_err("server exit.");
+		return -1;
+	} else if (ret < 0) {
+		clv_err("failed to receive server cmd");
+		return -1;
+	}
+
+	if (tlv->tag == CLV_TAG_INPUT) {
+		if (flag & CLV_CMD_INPUT_EVT_SHIFT) {
+
+		} else {
+			clv_err("unknown command 0x%08X, not a input cmd.",
+				flag);
+			return -1;
+		}
+	} else if (tlv->tag == CLV_TAG_WIN) {
+		if (flag & (1 << CLV_CMD_LINK_ID_ACK_SHIFT)) {
+			id = clv_client_parse_link_id(window->ipc_rx_buf);
+			if (id == 0) {
+				clv_err("create link failed.");
+				return -1;
+			}
+			window->link_id = id;
+			clv_debug("link_id: 0x%08lX", window->link_id);
+			(void)clv_dup_create_surface_cmd(
+					window->create_surface_tx_cmd,
+					window->create_surface_tx_cmd_t,
+					window->create_surface_tx_len,
+					&window->s);
+			ret = clv_send(fd, window->create_surface_tx_cmd,
+				       window->create_surface_tx_len);
+			if (ret == -1) {
+				clv_err("server exit.");
+				return -1;
+			} else if (ret < 0) {
+				clv_err("failed to send create surface cmd");
+				return -1;
+			}
+		} else if (flag & (1 << CLV_CMD_CREATE_SURFACE_ACK_SHIFT)) {
+			id = clv_client_parse_surface_id(window->ipc_rx_buf);
+			if (id == 0) {
+				clv_err("create surface failed.");
+				return -1;
+			}
+			window->s.surface_id = id;
+			clv_debug("create surface ok, surface_id = 0x%08lX",
+				  window->s.surface_id);
+			(void)clv_dup_create_view_cmd(
+					window->create_view_tx_cmd,
+					window->create_view_tx_cmd_t,
+					window->create_view_tx_len,
+					&window->v);
+			ret = clv_send(fd, window->create_view_tx_cmd,
+				       window->create_view_tx_len);
+			if (ret == -1) {
+				clv_err("server exit.");
+				return -1;
+			} else if (ret < 0) {
+				clv_err("failed to send create view cmd");
+				return -1;
+			}
+		} else if (flag & (1 << CLV_CMD_CREATE_VIEW_ACK_SHIFT)) {
+			id = clv_client_parse_view_id(window->ipc_rx_buf);
+			if (id == 0) {
+				clv_err("create view failed.");
+				return -1;
+			}
+			window->v.view_id = id;
+			clv_debug("create view ok, view_id: 0x%08lX",
+				  window->v.view_id);
+			window->b.stride = window->buf[0].stride;
+			strcpy(window->b.name, window->buf[0].shm.name);
+			window->b.surface_id = window->s.surface_id;
+			(void)clv_dup_create_bo_cmd(
+					window->create_bo_tx_cmd,
+					window->create_bo_tx_cmd_t,
+					window->create_bo_tx_len,
+					&window->b);
+			ret = clv_send(fd, window->create_bo_tx_cmd,
+				       window->create_bo_tx_len);
+			if (ret == -1) {
+				clv_err("server exit.");
+				return -1;
+			} else if (ret < 0) {
+				clv_err("failed to send create bo cmd");
+				return -1;
+			}
+		} else if (flag & (1 << CLV_CMD_CREATE_BO_ACK_SHIFT)) {
+			id = clv_client_parse_bo_id(window->ipc_rx_buf);
+			if (id == 0) {
+				clv_err("create bo failed.");
+				return -1;
+			}
+			if (!bo_0_created) {
+				window->buf[0].id = id;
+				clv_debug("create bo[0] ok, bo_id: 0x%08lX",
+					  window->buf[0].id);
+				bo_0_created = 1;
+				window->b.stride = window->buf[1].stride;
+				strcpy(window->b.name, window->buf[1].shm.name);
+				window->b.surface_id = window->s.surface_id;
+				(void)clv_dup_create_bo_cmd(
+						window->create_bo_tx_cmd,
+						window->create_bo_tx_cmd_t,
+						window->create_bo_tx_len,
+						&window->b);
+				ret = clv_send(fd, window->create_bo_tx_cmd,
+					       window->create_bo_tx_len);
+				if (ret == -1) {
+					clv_err("server exit.");
+					return -1;
+				} else if (ret < 0) {
+					clv_err("failed to send create bo cmd");
+					return -1;
+				}
+			} else {
+				window->buf[1].id = id;
+				clv_debug("create bo[1] ok, bo_id: 0x%08lX",
+					  window->buf[1].id);
+				clv_debug("Start to draw.");
+				shmbuf_redraw(window);
+				clv_event_source_timer_update(
+					display->collect_event, 1000, 0);
+			}
+		} else if (flag & (1 << CLV_CMD_COMMIT_ACK_SHIFT)) {
+			clv_client_parse_commit_ack_cmd(window->ipc_rx_buf);
+			//clv_debug("receive commit ack");
+		} else if (flag & (1 << CLV_CMD_BO_COMPLETE_SHIFT)) {
+			id=clv_client_parse_bo_complete_cmd(window->ipc_rx_buf);
+			//clv_debug("receive bo complete %lu", id);
+			frame_cnt++;
+			window->flip_pending = 0;
+		} else if (flag & (1 << CLV_CMD_SHELL_SHIFT)) {
+			clv_debug("receive shell event");
+		} else if (flag & (1 << CLV_CMD_DESTROY_ACK_SHIFT)) {
+			clv_debug("receive destroy ack");
+		} else {
+			clv_err("unknown command 0x%08X", flag);
+			return -1;
+		}
+	} else {
+		clv_err("command is not a win/input command");
+		return -1;
+	}
+
+	return 0;
+}
+
+void run_shm_client(void)
+{
+	struct client_display *display;
+	struct shm_window *win;
+
+	display = create_client_display(drm_node);
+	if (!display) {
+		clv_err("create client_display failed.");
+		return;
+	}
+
+	win = create_shmbuf_window(display, win_x, win_y, win_width,win_height);
+	if (!win) {
+		clv_err("create client display failed.");
+		return;
+	}
+
+	display->shm_window = win;
+	win->disp = display;
+	display->loop = clv_event_loop_create();
+	assert(display->loop);
+	display->sock_event = clv_event_loop_add_fd(display->loop,
+						    display->sock,
+						    CLV_EVT_READABLE,
+						    shm_client_event_cb,
+						    display);
+	assert(display->sock_event);
+	display->repaint_event = clv_event_loop_add_timer(display->loop,
+							  shm_repaint_cb,
+							  display);
+	assert(display->repaint_event);
+
+	display->collect_event = clv_event_loop_add_timer(display->loop,
+							  collect_cb,
+							  display);
+
+	run_client_event_loop(display);
+}
+
 void run_dmabuf_client(void)
 {
 	struct client_display *display;
@@ -1028,20 +1493,20 @@ void run_dmabuf_client(void)
 		return;
 	}
 
-	win = create_client_window(display, win_x, win_y, win_width,win_height);
+	win = create_dmabuf_window(display, win_x, win_y, win_width,win_height);
 	if (!win) {
 		clv_err("create client display failed.");
 		return;
 	}
 
-	display->window = win;
+	display->dmabuf_window = win;
 	win->disp = display;
 	display->loop = clv_event_loop_create();
 	assert(display->loop);
 	display->sock_event = clv_event_loop_add_fd(display->loop,
 						    display->sock,
 						    CLV_EVT_READABLE,
-						    client_event_cb,
+						    dmabuf_client_event_cb,
 						    display);
 	assert(display->sock_event);
 	display->repaint_event = clv_event_loop_add_timer(display->loop,
@@ -1103,6 +1568,8 @@ s32 main(s32 argc, char **argv)
 		 win_height);
 	if (is_dmabuf) {
 		run_dmabuf_client();
+	} else {
+		run_shm_client();
 	}
 
 	return 0;

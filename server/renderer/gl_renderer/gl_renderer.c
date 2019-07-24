@@ -1558,8 +1558,14 @@ static void gl_flush_damage(struct clv_surface *surface)
 		/* begin access buffer */
 		for (j = 0; j < gs->count_textures; j++) {
 			glBindTexture(GL_TEXTURE_2D, gs->textures[j]);
+			gles_debug("ROW LENGTH %u", gs->pitch / gs->hsub[j]);
 			glPixelStorei(GL_UNPACK_ROW_LENGTH_EXT,
 				      gs->pitch / gs->hsub[j]);
+			gles_debug("glTexImage2D %u %u %u %p %u",
+				   gs->pitch / gs->hsub[j],
+				   buffer->h / gs->vsub[j],
+				   0,
+				   data, gs->offset[j]);
 			glTexImage2D(GL_TEXTURE_2D, 0,
 				     gs->gl_format[j],
 				     gs->pitch / gs->hsub[j],
@@ -1577,14 +1583,28 @@ static void gl_flush_damage(struct clv_surface *surface)
 	/* begin access buffer */
 	for (i = 0; i < count_boxes; i++) {
 		box = &boxes[i];
+		gles_debug("data[0]: 0x%02X data[1]: 0x%02X "
+		       "data[2]: 0x%02X data[3]: 0x%02X\n",
+		       data[0], data[1],
+		       data[2], data[3]);
+		gles_debug("count_textures = %d", gs->count_textures);
 		for (j = 0; j < gs->count_textures; j++) {
 			glBindTexture(GL_TEXTURE_2D, gs->textures[j]);
+			gles_debug("ROW LENGTH %u", gs->pitch / gs->hsub[j]);
 			glPixelStorei(GL_UNPACK_ROW_LENGTH_EXT,
 				      gs->pitch / gs->hsub[j]);
+			gles_debug("Skip pixels %u",box->p1.x / gs->hsub[j]);
 			glPixelStorei(GL_UNPACK_SKIP_PIXELS_EXT,
 				      box->p1.x / gs->hsub[j]);
+			gles_debug("Skip rows %u",box->p1.y / gs->vsub[j]);
 			glPixelStorei(GL_UNPACK_SKIP_ROWS_EXT,
 				      box->p1.y / gs->vsub[j]);
+			gles_debug("glTexSubImage2D %u %u %u %u %p %u",
+				   box->p1.x / gs->hsub[j],
+				   box->p1.y / gs->vsub[j],
+				   (box->p2.x - box->p1.x) / gs->hsub[j],
+				   (box->p2.y - box->p1.y) / gs->vsub[j],
+				   data, gs->offset[j]);
 			glTexSubImage2D(GL_TEXTURE_2D, 0,
 					box->p1.x / gs->hsub[j],
 					box->p1.y / gs->vsub[j],
@@ -1917,9 +1937,9 @@ err1:
 	return -1;
 }
 
-void gl_set_renderer_dbg(u8 flag)
+void gl_set_renderer_dbg(u32 flags)
 {
-	gles_dbg = flag & 0x0F;
-	egl_dbg = (flag & 0xF0) >> 4;
+	gles_dbg = flags & 0x0F;
+	egl_dbg = (flags >> 4) & 0x0F;
 }
 

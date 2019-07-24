@@ -172,6 +172,7 @@ struct clv_bo_info {
 	enum clv_buffer_type type;
 	enum clv_pixel_fmt fmt;
 	u32 internal_fmt;
+	u32 count_planes;
 	char name[CLV_BUFFER_NAME_LEN];
 	u32 width, stride, height;
 	u64 surface_id;
@@ -179,6 +180,7 @@ struct clv_bo_info {
 
 struct clv_commit_info {
 	u64 bo_id;
+	struct clv_rect bo_damage;
 
 	s32 shown; /* 0: hide / 1: show */
 
@@ -202,20 +204,20 @@ struct clv_canvas_layout {
 };
 
 struct clv_debug_flags {
-	u8 server_flag;
-	u8 protocal_flag;
+	u8 common_flag;
 	u8 compositor_flag;
-	u8 scanout_flag;
-	u8 renderer_flag;
+	u8 drm_flag;
+	u8 gbm_flag;
+	u8 ps_flag;
 	u8 timer_flag;
-	u8 scanout_state_flag;
-	u8 ipc_flag;
+	u8 gles_flag;
+	u8 egl_flag;
 };
 
 struct clv_shell_info {
 	enum clv_shell_cmd cmd;
 	union {
-		struct clv_debug_flags flag;
+		struct clv_debug_flags dbg_flags;
 		struct clv_canvas_layout layout;
 	} value;
 };
