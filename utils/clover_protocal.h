@@ -43,6 +43,9 @@ enum clv_cmd_shift {
 	/* server feeds back the result of BO creation */
 	CLV_CMD_CREATE_BO_ACK_SHIFT,
 
+	CLV_CMD_DESTROY_BO_SHIFT,
+	CLV_CMD_DESTROY_BO_ACK_SHIFT,
+
 	/*
 	 * Client commit the new state of surface to server.
 	 * Commit: Changes of buffer object/view/surface
@@ -61,7 +64,7 @@ enum clv_cmd_shift {
 	CLV_CMD_COMMIT_SHIFT,
 	/* server feeds back the result of BO's attaching operation */
 	CLV_CMD_COMMIT_ACK_SHIFT,
-	/* server notify client the BO is no longer in use */
+	/* server notify client the BO (not DRM DMA-BUF) is no longer in use */
 	CLV_CMD_BO_COMPLETE_SHIFT,
 	/* mouse & kbd event report */
 	CLV_CMD_INPUT_EVT_SHIFT,
@@ -156,8 +159,9 @@ enum clv_pixel_fmt {
 	CLV_PIXEL_FMT_ARGB8888, /* SHM / DMA-BUF */
 	CLV_PIXEL_FMT_YUV420P, /* SHM */
 	CLV_PIXEL_FMT_YUV444P, /* SHM */
-	CLV_PIXEL_FMT_NV12, /* DMA-BUF (no render) only */
-	CLV_PIXEL_FMT_NV24, /* DMA-BUF (no render) only */
+	CLV_PIXEL_FMT_NV12, /* DMA-BUF */
+	CLV_PIXEL_FMT_NV24, /* DMA-BUF */
+	CLV_PIXEL_FMT_NV16, /* DMA-BUF */
 };
 
 #define CLV_BUFFER_NAME_LEN 32
@@ -223,15 +227,15 @@ struct clv_shell_info {
 };
 
 struct clv_input_event {
-	uint16_t type;
-	uint16_t code;
+	u16 type;
+	u16 code;
 	union {
-		uint32_t value;
+		u32 value;
 		struct {
-			uint16_t x;
-			uint16_t y;
-			int16_t dx;
-			int16_t dy;
+			u16 x;
+			u16 y;
+			s16 dx;
+			s16 dy;
 		} pos;
 	} v;
 };
@@ -280,6 +284,9 @@ u8 *clv_server_create_input_evt_cmd(struct clv_input_event *evts,
 				    u32 count_evts, u32 *n);
 u8 *clv_server_fill_input_evt_cmd(u8 *dst, struct clv_input_event *evts,
 				  u32 count_evts, u32 *n, u32 max_size);
+u8 *clv_client_destroy_bo_cmd(u64 bo_id, u32 *n);
+u8 *clv_dup_destroy_bo_cmd(u8 *dst, u8 *src, u32 n, u64 bo_id);
+u64 clv_server_parse_destroy_bo_cmd(u8 *data);
 void clv_cmd_dump(u8 *data);
 
 #endif

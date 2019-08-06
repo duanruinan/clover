@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <assert.h>
 #include <clover_utils.h>
+#include <clover_log.h>
 #include <clover_ipc.h>
 #include <clover_event.h>
 #include <clover_protocal.h>
@@ -113,6 +114,64 @@ static void parse_log_param(char *param, struct clv_shell_info *si)
 	free(opt);
 }
 
+static void parse_layout_param(char *param, struct clv_shell_info *si)
+{
+	char *opt = malloc(256);
+	char *p, *src;
+	s32 i = 0;
+
+	memset(si, 0, sizeof(*si));
+	si->cmd = CLV_SHELL_CANVAS_LAYOUT_SETTING;
+	assert(opt);
+	strcpy(opt, param);
+	src = opt;
+	while (1) {
+		p = strtok(src, ":");
+		src = NULL;
+		if (!p)
+			break;
+		if (!strcmp(p, "duplicated")) {
+			si->value.layout.mode = 0;
+			clv_debug("Set layout mode as duplicated.");
+		} else if (!strcmp(p, "extended")) {
+			si->value.layout.mode = 1;
+			clv_debug("Set layout mode as extended.");
+		}
+		
+		while (1) {
+			p = strtok(NULL, ",");
+			if (!p)
+				break;
+			si->value.layout.desktops[i].pos.x = atoi(p);
+			
+			p = strtok(NULL, "/");
+			if (!p)
+				break;
+			si->value.layout.desktops[i].pos.y = atoi(p);
+			
+			p = strtok(NULL, "x");
+			if (!p)
+				break;
+			si->value.layout.desktops[i].w = atoi(p);
+			
+			p = strtok(NULL, ":");
+			if (!p)
+				break;
+			si->value.layout.desktops[i].h = atoi(p);
+			
+			clv_debug("desktop[%d]: %d,%d %ux%u", i,
+				si->value.layout.desktops[i].pos.x,
+				si->value.layout.desktops[i].pos.y,
+				si->value.layout.desktops[i].w,
+				si->value.layout.desktops[i].h);
+			i++;
+		}
+		si->value.layout.count_heads = i;
+		clv_debug("Count heads: %u", si->value.layout.count_heads);
+	}
+	free(opt);
+}
+
 struct shell_obj {
 	s32 sock;
 	struct clv_shell_info si;
@@ -130,6 +189,8 @@ static s32 sock_cb(s32 fd, u32 mask, void *data)
 	u8 *tx_buf, *rx_p;
 	u32 flag, length, n;
 	s32 ret;
+	struct clv_shell_info si;
+	s32 i;
 
 	ret = clv_recv(fd, so->rx_buf, sizeof(*tlv) + sizeof(u32));
 	if (ret == -1) {
@@ -161,11 +222,27 @@ static s32 sock_cb(s32 fd, u32 mask, void *data)
 		if (flag & (1 << CLV_CMD_LINK_ID_ACK_SHIFT)) {
 			so->linkid = clv_client_parse_link_id(so->rx_buf);
 			tx_buf = clv_create_shell_cmd(&so->si, &n);
-			so->run = 0;
+			if (so->si.cmd == CLV_SHELL_DEBUG_SETTING)
+				so->run = 0;
 			if (clv_send(fd, tx_buf, n) < 0) {
 				fprintf(stderr, "server exit.\n");
 				return -1;
 			}
+		} else if (flag & (1 << CLV_CMD_SHELL_SHIFT)) {
+			memset(&si, 0, sizeof(si));
+			clv_parse_shell_cmd(so->rx_buf, &si);
+			clv_debug("Layout: %s", si.value.layout.mode == 0 ?
+				  "D" : "E");
+			clv_debug("Count heads: %u",
+				  si.value.layout.count_heads);
+			for (i = 0; i < si.value.layout.count_heads; i++) {
+				clv_debug("Head [%d]: %d,%d %ux%u", i,
+				    si.value.layout.desktops[i].pos.x,
+				    si.value.layout.desktops[i].pos.y,
+				    si.value.layout.desktops[i].w,
+				    si.value.layout.desktops[i].h);
+			}
+			so->run = 0;
 		}
 	}
 
@@ -187,7 +264,7 @@ s32 main(s32 argc, char **argv)
 			so.si.cmd = CLV_SHELL_CANVAS_LAYOUT_QUERY;
 			break;
 		case 's':
-			so.si.cmd = CLV_SHELL_CANVAS_LAYOUT_SETTING;
+			parse_layout_param(optarg, &so.si);
 			break;
 		default:
 			usage();

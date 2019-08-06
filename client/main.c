@@ -16,9 +16,12 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
  * MA  02110-1301, USA.
  */
+#define _GNU_SOURCE
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <errno.h>
 #include <getopt.h>
 #include <signal.h>
@@ -58,13 +61,14 @@ void usage(void)
 	printf("\t\t-y, --top=y position\n");
 	printf("\t\t-w, --width=window width\n");
 	printf("\t\t-h, --height=window height\n");
+	printf("\t\t-o, --output=primary output\n");
 }
 
 char drm_node[] = "/dev/dri/renderD128";
 char client_short_options[] = "dsn:w:h:x:y:o:";
 u32 win_width, win_height;
 s32 win_x, win_y;
-s32 is_dmabuf = 1;
+s32 is_dmabuf = 0;
 u32 output_index = 0;
 
 struct option client_options[] = {
@@ -769,8 +773,9 @@ static struct dmabuf_window *create_dmabuf_window(struct client_display *disp,
 	win->v.area.w = win->w;
 	win->v.area.h = win->h;
 	win->v.alpha = 1.0f;
-	win->v.output_mask = 0x03;
 	win->v.primary_output = output_index;
+	//win->v.output_mask = 0x03;
+	win->v.output_mask = 1 << output_index;
 	win->b.type = CLV_BUF_TYPE_DMA;
 	win->b.fmt = CLV_PIXEL_FMT_ARGB8888;
 	win->b.internal_fmt = DRM_FORMAT_ARGB8888;
@@ -866,7 +871,8 @@ static struct shm_window *create_shmbuf_window(struct client_display *disp,
 	win->v.area.w = win->w;
 	win->v.area.h = win->h;
 	win->v.alpha = 1.0f;
-	win->v.output_mask = 0x03;
+	//win->v.output_mask = 0x03;
+	win->v.output_mask = 1 << output_index;
 	win->v.primary_output = output_index;
 	win->b.type = CLV_BUF_TYPE_SHM;
 	win->b.fmt = CLV_PIXEL_FMT_ARGB8888;
@@ -932,6 +938,38 @@ static void run_client_event_loop(struct client_display *disp)
  *        |     |
  *    red +-----+ blue
  */
+#define NSEC_PER_SEC 1000000000
+static inline void timespec_sub(struct timespec *r,
+				const struct timespec *a,
+				const struct timespec *b)
+{
+	r->tv_sec = a->tv_sec - b->tv_sec;
+	r->tv_nsec = a->tv_nsec - b->tv_nsec;
+	if (r->tv_nsec < 0) {
+		r->tv_sec--;
+		r->tv_nsec += NSEC_PER_SEC;
+	}
+}
+
+static inline s64 timespec_to_nsec(const struct timespec *a)
+{
+	return (s64)a->tv_sec * NSEC_PER_SEC + a->tv_nsec;
+}
+
+static inline s64 timespec_sub_to_nsec(const struct timespec *a,
+				       const struct timespec *b)
+{
+	struct timespec r;
+	timespec_sub(&r, a, b);
+	return timespec_to_nsec(&r);
+}
+
+static inline s64 timespec_sub_to_msec(const struct timespec *a,
+				       const struct timespec *b)
+{
+	return timespec_sub_to_nsec(a, b) / 1000000;
+}
+
 static void render_gpu(struct dmabuf_window *window, struct dma_buf *buffer)
 {
 	/* Complete a movement iteration in 5000 ms. */
@@ -950,8 +988,10 @@ static void render_gpu(struct dmabuf_window *window, struct dma_buf *buffer)
 	};
 	GLfloat offset;
 	struct timeval tv;
+	struct timespec t1, t2, t3;
 	u64 time_ms;
 
+	clock_gettime(CLOCK_MONOTONIC, &t1);
 	gettimeofday(&tv, NULL);
 	time_ms = tv.tv_sec * 1000 + tv.tv_usec / 1000;
 
@@ -979,7 +1019,13 @@ static void render_gpu(struct dmabuf_window *window, struct dma_buf *buffer)
 	glDisableVertexAttribArray(window->gl.pos);
 	glDisableVertexAttribArray(window->gl.color);
 
+	clock_gettime(CLOCK_MONOTONIC, &t2);
 	glFinish();
+	clock_gettime(CLOCK_MONOTONIC, &t3);
+	//printf("client render spent %ld ms\n",
+	//	timespec_sub_to_msec(&t2, &t1));
+	//printf("client gl flush spent %ld ms\n",
+	//	timespec_sub_to_msec(&t3, &t2));
 }
 
 static void dmabuf_redraw(void *data)
@@ -1012,6 +1058,7 @@ static void render_cpu(struct shm_window *window, struct shm_buf *buffer)
 	u32 i, *pixel;
 	static u32 c = 0x80FF00;
 
+#if 1
 	pixel = (u32 *)(buffer->shm.map);
 //	printf("render_cpu %p >>>>>>>>>>>> 0x%08X\n", pixel,
 //		0xFF000000 | c);
@@ -1021,6 +1068,17 @@ static void render_cpu(struct shm_window *window, struct shm_buf *buffer)
 	c -= 0x001000;
 	if (c <= 0x000000)
 		c = 0x80F000;
+#else
+	static s32 first = 2;
+
+	pixel = (u32 *)(buffer->shm.map);
+	if (first) {
+		first--;
+		for (i = 0; i < buffer->shm.sz / 4; i++) {
+			pixel[i] = (0xFF00FF00);
+		}
+	}
+#endif
 }
 
 static void shmbuf_redraw(void *data)
@@ -1040,10 +1098,17 @@ static void shmbuf_redraw(void *data)
 	render_cpu(window, buffer);
 
 	window->c.bo_id = buffer->id;
+#if 1
 	window->c.bo_damage.pos.x = buffer->w / 3;
 	window->c.bo_damage.pos.y = buffer->h / 3;
 	window->c.bo_damage.w = buffer->w / 3;
 	window->c.bo_damage.h = buffer->h / 3;
+#else
+	window->c.bo_damage.pos.x = 0;
+	window->c.bo_damage.pos.y = 0;
+	window->c.bo_damage.w = buffer->w;
+	window->c.bo_damage.h = buffer->h;
+#endif
 
 	clv_dup_commit_req_cmd(window->commit_tx_cmd, window->commit_tx_cmd_t,
 			       window->commit_tx_len, &window->c);
@@ -1524,6 +1589,11 @@ void run_dmabuf_client(void)
 s32 main(s32 argc, char **argv)
 {
 	s32 ch;
+	cpu_set_t set;
+
+	CPU_ZERO(&set);
+	CPU_SET(0, &set);
+	sched_setaffinity(4, sizeof(set), &set);
 
 	while ((ch = getopt_long(argc, argv, client_short_options,
 				 client_options, NULL)) != -1) {
@@ -1566,6 +1636,7 @@ s32 main(s32 argc, char **argv)
 	clv_info("Render Device: %s", drm_node);
 	clv_info("Window rect: %d,%d %ux%u", win_x, win_y, win_width,
 		 win_height);
+
 	if (is_dmabuf) {
 		run_dmabuf_client();
 	} else {

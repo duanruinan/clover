@@ -214,10 +214,35 @@ static s32 clv_compositor_backend_create(struct clv_compositor *c)
 	c->backend = backend_create(c);
 	if (!c->backend) {
 		return -1;
-	}	
-	set_scanout_dbg(0);
+	}
 
 	return 0;
+}
+
+static void clv_compositor_init_dummy_cursor(struct clv_compositor *c)
+{
+	cmp_debug("init dummy cursor ...");
+	memset(&c->dummy_cursor_surf, 0, sizeof(c->dummy_cursor_surf));
+	c->dummy_cursor_surf.is_bg = 0;
+	c->dummy_cursor_surf.c = c;
+	c->dummy_cursor_surf.is_opaque = 0;
+	c->dummy_cursor_surf.view = &c->dummy_cursor_view;
+	clv_region_init_rect(&c->dummy_cursor_surf.damage, 0, 0, 32, 32);
+	clv_region_init_rect(&c->dummy_cursor_surf.opaque, 0, 0, 32, 32);
+	clv_signal_init(&c->dummy_cursor_surf.destroy_signal);
+	c->dummy_cursor_surf.w = 32;
+	c->dummy_cursor_surf.h = 32;
+
+	memset(&c->dummy_cursor_view, 0, sizeof(c->dummy_cursor_view));
+	c->dummy_cursor_view.surface = &c->dummy_cursor_surf;
+	c->dummy_cursor_view.area.pos.x = 1919;
+	c->dummy_cursor_view.area.pos.y = 0;
+	c->dummy_cursor_view.area.w = 32;
+	c->dummy_cursor_view.area.h = 32;
+	c->dummy_cursor_view.alpha = 1.0f;
+	c->dummy_cursor_view.output_mask = 0xFF;
+	c->dummy_cursor_view.type = CLV_VIEW_TYPE_CURSOR;
+	list_add_tail(&c->dummy_cursor_view.link, &c->views);
 }
 
 static void clv_compositor_init_background(struct clv_compositor *c)
@@ -259,7 +284,7 @@ static void clv_compositor_init_background(struct clv_compositor *c)
 	unlink(c->bg_buf.base.name);
 	clv_shm_init(&c->bg_buf.shm, c->bg_buf.base.name,
 		     c->bg_buf.base.size, 1);
-	pixel = (u32 *)c->bg_buf.shm.map;;
+	pixel = (u32 *)c->bg_buf.shm.map;
 	for (s32 i = 0; i < c->bg_buf.base.size / 4; i++)
 		pixel[i] = 0xFF404040;
 
@@ -301,6 +326,7 @@ struct clv_compositor *clv_compositor_create(struct clv_display *display)
 	}
 
 	clv_compositor_init_background(c);
+	//clv_compositor_init_dummy_cursor(c);
 
 	return c;
 
@@ -397,10 +423,17 @@ void clv_output_schedule_repaint(struct clv_output *output, s32 cnt)
 	struct clv_compositor *c = output->c;
 	struct clv_event_loop *loop;
 
+	//printf("schedule output[%u]'s repaint\n", output->index);
+	if (!output->enabled) {
+		printf("output[%u] is disabled\n", output->index);
+		cmp_warn("output %u is disabled.!", output->index);
+		return;
+	}
 	cmp_debug("repaint scheduled...");
 	output->primary_dirty = 1;
 	loop = clv_display_get_event_loop(c->display);
 	if (output->repaint_status != REPAINT_NOT_SCHEDULED) {
+		//printf("output[%u]'s repaint already started.\n");
 		cmp_info("repaint already scheduled! %u %d",
 			 output->repaint_status, output->repaint_needed);
 		output->repaint_pending = 1;
@@ -420,6 +453,7 @@ void clv_compositor_schedule_repaint(struct clv_compositor *c)
 {
 	struct clv_output *output;
 
+	printf("compositor schedule repaint \n");
 	list_for_each_entry(output, &c->outputs, link)
 		clv_output_schedule_repaint(output, 1);
 }
@@ -428,6 +462,7 @@ void clv_surface_schedule_repaint(struct clv_surface *surface)
 {
 	struct clv_output *output;
 
+	printf("surface schedule repaint\n");
 	list_for_each_entry(output, &surface->c->outputs, link) {
 		if (surface->output_mask & (1 << output->index)) {
 			clv_output_schedule_repaint(output, 1);
@@ -439,6 +474,7 @@ void clv_view_schedule_repaint(struct clv_view *view)
 {
 	struct clv_output *output;
 
+	//printf("view schedule repaint\n");
 	list_for_each_entry(output, &view->surface->c->outputs, link) {
 		if (view->output_mask & (1 << output->index)) {
 			clv_output_schedule_repaint(output, 1);
@@ -514,7 +550,7 @@ void clv_output_finish_frame(struct clv_output *output, struct timespec *stamp)
 		output->next_repaint = now;
 	}
 	if (msec_rel < 0) {
-		timer_info("[OUTPUT: %u] msec_rel < 0 %ld, next: %ld, %ld "
+		timer_debug("[OUTPUT: %u] msec_rel < 0 %ld, next: %ld, %ld "
 			   "now: %ld, %ld",
 			   output->index, msec_rel, output->next_repaint.tv_sec,
 			   output->next_repaint.tv_nsec / 1000000l,
@@ -534,8 +570,9 @@ out:
 	output_repaint_timer_arm(c);
 }
 
-static void clv_output_schedule_repaint_reset(struct clv_output *output)
+void clv_output_schedule_repaint_reset(struct clv_output *output)
 {
+	//printf("schedule output[%u]'s repaint reset\n", output->index);
 	output->repaint_status = REPAINT_NOT_SCHEDULED;
 	cmp_debug("repaint loop exit.");
 }
@@ -619,6 +656,8 @@ static s32 output_repaint_timer_handler(void *data)
 		repaint_data = c->backend->repaint_begin(c);
 
 	list_for_each_entry(output, &c->outputs, link) {
+		if (!output->enabled)
+			continue;
 		ret = clv_output_maybe_repaint(output, &now, repaint_data);
 		if (ret)
 			break;
@@ -746,6 +785,7 @@ struct clv_view *clv_view_create(struct clv_surface *s,
 	struct clv_view *v = calloc(1, sizeof(*v));
 	struct clv_output *output;
 
+	assert(s);
 	if (!v)
 		return NULL;
 
@@ -765,9 +805,16 @@ struct clv_view *clv_view_create(struct clv_surface *s,
 			break;
 		}
 	}
-	assert(s->primary_output);
+	if (s->primary_output)
+		return v;
 
-	return v;
+	cmp_warn("cannot find primary output, choose the first output.");
+	list_for_each_entry(output, &s->c->outputs, link) {
+		s->primary_output = output;
+		return v;
+	}
+
+	return NULL;
 }
 
 void shm_buffer_destroy(struct clv_buffer *buffer)
@@ -817,6 +864,7 @@ void client_agent_destroy(struct clv_client_agent *agent)
 	output_mask = agent->view->output_mask;
 	/* destroy view */
 	clv_view_destroy(agent->view);
+	printf("client destroy schedule output's repaint\n");
 	list_for_each_entry(output, &c->outputs, link) {
 		if (output_mask & (1 << output->index)) {
 			clv_output_schedule_repaint(output, 1);
@@ -917,3 +965,4 @@ struct clv_client_agent *client_agent_create(
 
 	return agent;
 }
+

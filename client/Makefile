@@ -21,7 +21,7 @@ CLOVER_UTILS_H += $(RPATH)/utils/clover_protocal.h
 PLATFORM_CFLAGS += -I${TOOLCHAIN_SYSROOT}/usr/include/libdrm
 PLATFORM_LDFLAGS += -lgbm -lEGL -lGLESv2
 
-all: clover_simple_client clover_shell
+all: clover_simple_client clover_shell external_dmabuf clover_input
 
 clover_simple_client: main.o \
 		$(RPATH)/utils/libclover_utils.so
@@ -37,7 +37,22 @@ clover_shell: clover_shell.o \
 clover_shell.o: clover_shell.c $(CLOVER_UTILS_H)
 	$(CC) -c $< -I. $(CFLAGS) $(PLATFORM_CFLAGS) -o $@
 
+external_dmabuf: dmabuf.o \
+		$(RPATH)/utils/libclover_utils.so
+	$(CC) $< $(LDFLAGS) -ldrm -o $@
+
+dmabuf.o: dmabuf.c $(CLOVER_UTILS_H)
+	$(CC) -c $< -I. $(CFLAGS) $(PLATFORM_CFLAGS) -o $@
+
+clover_input: input.o \
+		$(RPATH)/utils/libclover_utils.so
+	$(CC) $< $(LDFLAGS) -ludev -o $@
+
+input.o: input.c $(CLOVER_UTILS_H)
+	$(CC) -c $< -I. $(CFLAGS) -o $@
+
 clean:
 	-@rm -f *.o
-	-@rm -f clover_simple_client clover_shell
+	-@rm -f clover_simple_client clover_shell external_dmabuf \
+		clover_input
 

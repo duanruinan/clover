@@ -16,7 +16,8 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
  * MA  02110-1301, USA.
  */
-
+#define _GNU_SOURCE
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -178,9 +179,90 @@ static void head_state_changed_cb(struct clv_listener *listener, void *data)
 						   &server.config->heads[i]);
 			output->enable(output,
 			  &server.config->heads[i].encoder.output.render_area);
+			printf("Head change schedule repaint\n");
+			clv_output_schedule_repaint_reset(output);
 			clv_output_schedule_repaint(output, 2);
 		} else {
 			output->disable(output);
+		}
+	}
+}
+
+static void update_layout(struct clv_compositor *c, struct clv_shell_info *si)
+{
+	struct clv_config *config;
+	struct clv_output *output;
+	s32 i;
+	struct clv_output_config *output_cfg;
+	struct clv_rect *rc;
+
+	config = server.config;
+	if (si->value.layout.mode != config->mode) {
+		com_info("Layout mode chanaged. %s -> %s",
+		    config->mode == CLV_DESKTOP_DUPLICATED ? "D" : "E",
+		    si->value.layout.mode == CLV_DESKTOP_DUPLICATED ? "D" :"E");
+		config->mode = si->value.layout.mode;
+	}
+	config->count_heads = si->value.layout.count_heads;
+	for (i = 0; i < config->count_heads; i++) {
+		output = server.outputs[i];
+		if (!output)
+			continue;
+		output_cfg = &config->heads[i].encoder.output;
+		rc = &si->value.layout.desktops[i];
+		if ((!rc->w && !rc->h) &&
+		    (output_cfg->render_area.w && output_cfg->render_area.h)) {
+			com_info("disable output[%d]", output->index);
+			output->disable(output);
+			clv_output_schedule_repaint(output, 2);
+			memcpy(&output_cfg->render_area, rc, sizeof(*rc));
+			output->changed = 4;
+		}
+	}
+
+	for (i = 0; i < config->count_heads; i++) {
+		output = server.outputs[i];
+		if (!output)
+			continue;
+		if (!rc->w && !rc->h)
+			continue;
+		output_cfg = &config->heads[i].encoder.output;
+		rc = &si->value.layout.desktops[i];
+		if (rc->w != output_cfg->render_area.w ||
+		    rc->h != output_cfg->render_area.h ||
+		    rc->pos.x != output_cfg->render_area.pos.x ||
+		    rc->pos.y != output_cfg->render_area.pos.y) {
+			com_info("desktop[%u] changed %d,%d %ux%u -> "
+				 "%d,%d %ux%u", i,
+				 output_cfg->render_area.pos.x,
+				 output_cfg->render_area.pos.y,
+				 output_cfg->render_area.w,
+				 output_cfg->render_area.h,
+				 rc->pos.x,
+				 rc->pos.y,
+				 rc->w,
+				 rc->h);
+			com_info("output[%u] changed", output->index); 
+		} else {
+			com_info("output[%u] not changed", output->index);
+			continue;
+		}
+		if ((!output_cfg->render_area.w &&
+		            !output_cfg->render_area.h) &&
+		           (rc->w && rc->h)) {
+			com_info("enable output[%d]", output->index);
+			output->enable(output, rc);
+			clv_output_schedule_repaint_reset(output);
+			output->changed = 4;
+			memcpy(&output_cfg->render_area, rc, sizeof(*rc));
+			clv_output_schedule_repaint(output, output->changed);
+		} else if (output_cfg->render_area.w &&
+		           output_cfg->render_area.h){
+			memcpy(&output->render_area, rc,
+			       sizeof(struct clv_rect));
+			output->changed = 4;
+			memcpy(&output_cfg->render_area, rc, sizeof(*rc));
+			clv_output_schedule_repaint(output, output->changed);
 		}
 	}
 }
@@ -189,8 +271,8 @@ static s32 client_sock_cb(s32 fd, u32 mask, void *data)
 {
 	struct clv_client_agent *agent = data;
 	struct clv_tlv *tlv;
-	u8 *rx_p;
-	u32 flag, length, f, f1;
+	u8 *rx_p, *shell_tx_buf;
+	u32 flag, length, f, f1, n;
 	u64 id;
 	s32 ret, dmabuf_fd;
 	struct clv_surface_info si;
@@ -200,6 +282,8 @@ static s32 client_sock_cb(s32 fd, u32 mask, void *data)
 	struct clv_shell_info shell;
 	struct clv_buffer *buf;
 	struct timespec t1, t2;
+	struct clv_config *config;
+	s32 i;
 
 	ret = clv_recv(fd, agent->ipc_rx_buf, sizeof(*tlv) + sizeof(u32));
 	if (ret == -1) {
@@ -373,22 +457,40 @@ static s32 client_sock_cb(s32 fd, u32 mask, void *data)
 					  ci.delta_z,
 					  ci.bo_damage.pos.x,ci.bo_damage.pos.y,
 					  ci.bo_damage.w, ci.bo_damage.h);
-				clv_region_fini(&agent->surface->damage);
-				clv_region_init_rect(&agent->surface->damage,
-						     ci.bo_damage.pos.x,
-						     ci.bo_damage.pos.y,
-						     ci.bo_damage.w,
-						     ci.bo_damage.h);
-				agent->c->renderer->attach_buffer(
-					agent->surface, buf);
-				if (ci.bo_damage.w && ci.bo_damage.h) {
-					clock_gettime(agent->c->clk_id, &t1);
-					agent->c->renderer->flush_damage(
-						agent->surface);
-					clock_gettime(agent->c->clk_id, &t2);
-					com_debug("[TIMER] flush spent %ld ms",
-						timespec_sub_to_msec(&t2, &t1));
+				if (agent->view->type == CLV_VIEW_TYPE_CURSOR) {
+					agent->view->cursor_buf = buf;
+					agent->view->area.pos.x = ci.view_x;
+					agent->view->area.pos.y = ci.view_y;
 				}
+				clv_region_fini(&agent->surface->damage);
+				if (ci.bo_damage.w && ci.bo_damage.h)
+					clv_region_init_rect(
+						&agent->surface->damage,
+						ci.bo_damage.pos.x,
+						ci.bo_damage.pos.y,
+						ci.bo_damage.w,
+						ci.bo_damage.h);
+				else
+					clv_region_init(
+						&agent->surface->damage);
+				if (agent->view->type == CLV_VIEW_TYPE_PRIMARY){
+					agent->c->renderer->attach_buffer(
+						agent->surface, buf);
+					if (ci.bo_damage.w && ci.bo_damage.h) {
+						clock_gettime(
+							agent->c->clk_id, &t1);
+						agent->c->renderer-> \
+						    flush_damage(
+							agent->surface);
+						clock_gettime(agent->c->clk_id,
+								&t2);
+						com_debug("[TIMER] flush spent "
+							"%ld ms",
+							timespec_sub_to_msec(
+								&t2, &t1));
+					}
+				}
+				clv_region_fini(&agent->surface->damage);
 			} else if (buf->type == CLV_BUF_TYPE_DMA) {
 				com_debug("Commit info: 0x%08lX, %d, %d,"
 					  "%d:%ux%u %d",
@@ -403,8 +505,16 @@ static s32 client_sock_cb(s32 fd, u32 mask, void *data)
 
 			agent->view->plane = &agent->c->primary_plane;
 			clv_view_schedule_repaint(agent->view);
-			com_debug("************ add flip listener");
-			clv_surface_add_flip_listener(agent->surface);
+			if (agent->view->type != CLV_VIEW_TYPE_CURSOR) {
+				com_debug("************ add flip listener");
+				clv_surface_add_flip_listener(agent->surface);
+			} else {
+				if (ci.bo_damage.w && ci.bo_damage.h) {
+					com_debug("****** add flip listener");
+					clv_surface_add_flip_listener(
+						agent->surface);
+				}
+			}
 			id = 1;
 		}
 		clv_dup_commit_ack_cmd(agent->commit_ack_tx_cmd,
@@ -472,6 +582,36 @@ static s32 client_sock_cb(s32 fd, u32 mask, void *data)
 				f |= (shell.value.dbg_flags.egl_flag << 4);
 				f &= 0x0FF;
 				set_renderer_dbg(f);
+			} else if (shell.cmd == CLV_SHELL_CANVAS_LAYOUT_QUERY) {
+				com_debug("request canvas layout.");
+				config = server.config;
+				shell.value.layout.mode = (u32)(config->mode);
+				shell.value.layout.count_heads =
+					config->count_heads;
+				for (i = 0; i < config->count_heads; i++) {
+					shell.value.layout.desktops[i].pos.x =
+					    config->heads[i].encoder \
+					        .output.render_area.pos.x;
+					shell.value.layout.desktops[i].pos.y =
+					    config->heads[i].encoder \
+					        .output.render_area.pos.y;
+					shell.value.layout.desktops[i].w =
+					    config->heads[i].encoder \
+					        .output.render_area.w;
+					shell.value.layout.desktops[i].h =
+					    config->heads[i].encoder \
+					        .output.render_area.h;
+				}
+				shell_tx_buf = clv_create_shell_cmd(&shell, &n);
+				if (shell_tx_buf)
+					clv_send(fd, shell_tx_buf, n);
+			} else if (shell.cmd==CLV_SHELL_CANVAS_LAYOUT_SETTING) {
+				com_debug("receive layout setting command.");
+				// TODO enable /disable
+				update_layout(agent->c, &shell);
+				shell_tx_buf = clv_create_shell_cmd(&shell, &n);
+				if (shell_tx_buf)
+					clv_send(fd, shell_tx_buf, n);
 			}
 		}
 	} else {
@@ -509,6 +649,7 @@ s32 main(s32 argc, char **argv)
 	s32 ch;
 	struct clv_client_agent *agent, *next;
 	u32 n;
+	cpu_set_t set;
 
 	server.linkid_created_ack_tx_cmd_t
 		= clv_server_create_linkup_cmd(0, &n);
@@ -543,6 +684,9 @@ s32 main(s32 argc, char **argv)
 	if (run_as_daemon)
 		run_daemon();
 
+	CPU_ZERO(&set);
+	CPU_SET(0, &set);
+	sched_setaffinity(5, sizeof(set), &set);
 	server.config = load_config_from_file(config_xml);
 	server.count_outputs = server.config->count_heads;
 

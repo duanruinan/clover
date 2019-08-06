@@ -552,6 +552,84 @@ u64 clv_client_parse_bo_id(u8 *data)
 	return *((u64 *)(&tlv_result->payload[0]));
 }
 
+/********************************************************/
+u8 *clv_client_destroy_bo_cmd(u64 bo_id, u32 *n)
+{
+	struct clv_tlv *tlv, *tlv_map, *tlv_bo_id;
+	u32 size, size_bo_id, size_map, *map, *head;
+	u8 *p;
+
+	size_map = CLV_CMD_MAP_SIZE;
+	size_bo_id = sizeof(*tlv) + sizeof(u64);
+	size = sizeof(*tlv) + size_map + size_bo_id + sizeof(u32);
+	p = calloc(1, size);
+	if (!p)
+		return NULL;
+
+	head = (u32 *)p;
+	*head = (1 << CLV_CMD_DESTROY_BO_SHIFT);
+
+	tlv = (struct clv_tlv *)(p+sizeof(u32));
+	tlv->tag = CLV_TAG_WIN;
+	tlv->length = size_bo_id + size_map;
+	tlv_map = (struct clv_tlv *)(&tlv->payload[0]);
+	tlv_bo_id = (struct clv_tlv *)(&tlv->payload[0] + size_map);
+	tlv_map->tag = CLV_TAG_MAP;
+	tlv_map->length = CLV_CMD_MAP_SIZE - sizeof(struct clv_tlv);
+	map = (u32 *)(&tlv_map->payload[0]);
+	map[CLV_CMD_DESTROY_BO_SHIFT - CLV_CMD_OFFSET]
+		= (u8 *)tlv_bo_id - p;
+	tlv_bo_id->tag = CLV_TAG_RESULT;
+	tlv_bo_id->length = sizeof(u64);
+	*((u64 *)(&tlv_bo_id->payload[0])) = bo_id;
+	*n = size;
+
+	return p;
+}
+
+u8 *clv_dup_destroy_bo_cmd(u8 *dst, u8 *src, u32 n, u64 bo_id)
+{
+	struct clv_tlv *tlv, *tlv_map, *tlv_bo_id;
+	u32 *map;
+
+	memcpy(dst, src, n);
+
+	tlv = (struct clv_tlv *)(dst+sizeof(u32));
+	tlv_map = (struct clv_tlv *)(&tlv->payload[0]);
+	map = (u32 *)(&tlv_map->payload[0]);
+	tlv_bo_id = (struct clv_tlv *)(dst
+			+ map[CLV_CMD_DESTROY_BO_SHIFT-CLV_CMD_OFFSET]);
+	*((u32 *)(&tlv_bo_id->payload[0])) = bo_id;
+	return dst;
+}
+
+u64 clv_server_parse_destroy_bo_cmd(u8 *data)
+{
+	struct clv_tlv *tlv, *tlv_map, *tlv_result;
+	u32 size, *head, *map;
+
+	head = (u32 *)data;
+	if (!((*head) & (1 << CLV_CMD_DESTROY_BO_SHIFT)))
+		return 0;
+
+	tlv = (struct clv_tlv *)(data+sizeof(u32));
+	assert(tlv->tag == CLV_TAG_WIN);
+	size = sizeof(*tlv) + sizeof(u32) + tlv->length;
+	tlv_map = (struct clv_tlv *)(&tlv->payload[0]);
+	map = (u32 *)(&tlv_map->payload[0]);
+	if (map[CLV_CMD_DESTROY_BO_SHIFT - CLV_CMD_OFFSET] >= size)
+		return 0;
+	tlv_result = (struct clv_tlv *)(data
+			+ map[CLV_CMD_DESTROY_BO_SHIFT-CLV_CMD_OFFSET]);
+	if (tlv_result->tag != CLV_TAG_RESULT)
+		return 0;
+	if (tlv_result->length != sizeof(u64))
+		return 0;
+	return *((u64 *)(&tlv_result->payload[0]));
+}
+
+/********************************************************/
+
 u8 *clv_client_create_commit_req_cmd(struct clv_commit_info *c, u32 *n)
 {
 	struct clv_tlv *tlv, *tlv_map, *tlv_commit;

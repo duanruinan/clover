@@ -3,7 +3,8 @@ include $(RPATH)/build/build_env
 .PHONY: all
 .PHONY: clean
 
-OBJ := libclover_drm_backend.so detect_drm test_drm_backend drm_atomic_test
+OBJ := libclover_drm_backend.so detect_drm test_drm_backend drm_atomic_test \
+	drm_atomic_test_nv24
 
 CFLAGS += -I$(RPATH)/utils
 CFLAGS += -I$(RPATH)/server/compositor
@@ -30,6 +31,7 @@ clean:
 	-@rm detect_drm
 	-@rm test_drm_backend
 	-@rm drm_atomic_test
+	-@rm drm_atomic_test_nv24
 
 libclover_drm_backend.so: drm_backend.o
 	$(CC) -shared -rdynamic $^ $(LDFLAGS) $(PLATFORM_LDFLAGS) \
@@ -56,5 +58,11 @@ drm_atomic_test: drm_atomic_test.o
 	$(CC) $< $(PLATFORM_LDFLAGS) -o $@
 
 drm_atomic_test.o: drm_atomic_test.c $(CLOVER_UTILS_H)
+	$(CC) -c $< $(PLATFORM_CFLAGS) $(CFLAGS) -o $@
+
+drm_atomic_test_nv24: drm_atomic_test_nv24.o
+	$(CC) $< $(PLATFORM_LDFLAGS) -o $@
+
+drm_atomic_test_nv24.o: drm_atomic_test_nv24.c $(CLOVER_UTILS_H)
 	$(CC) -c $< $(PLATFORM_CFLAGS) $(CFLAGS) -o $@
 

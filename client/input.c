@@ -1,0 +1,872 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
+#include <sys/socket.h>
+#include <linux/kd.h>
+#include <dirent.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/ioctl.h>
+#include <linux/input.h>
+#include <libudev.h>
+#include <clover_event.h>
+#include <clover_shm.h>
+#include <clover_ipc.h>
+#include <clover_log.h>
+#include <clover_utils.h>
+#include <clover_protocal.h>
+
+#define CURSOR_MAX_WIDTH 64
+#define CURSOR_MAX_HEIGHT 64
+
+enum input_type {
+	INPUT_TYPE_UNKNOWN = 0,
+	INPUT_TYPE_MOUSE,
+	INPUT_TYPE_KBD,
+};
+
+struct shm_buf {
+	u32 w, h;
+	u32 stride;
+	struct clv_shm shm;
+	u64 id;
+};
+
+struct input_display;
+
+struct input_device {
+	s32 fd;
+	enum input_type type;
+	char name[256];
+	struct clv_event_source *input_source;
+	struct input_display *disp;
+	struct list_head link;
+};
+
+struct input_display {
+	struct udev *udev;
+	struct udev_monitor *udev_monitor;
+
+	struct clv_event_source *udev_source;
+	struct clv_event_source *clv_source;
+
+	struct clv_event_loop *loop;
+
+	struct list_head devs;
+
+	struct input_event *buffer;
+	s32 buffer_sz;
+
+	struct clv_input_event *tx_buf;
+	s32 tx_buf_sz;
+
+	u32 abs_x, abs_y; /* cursor pos */
+	s32 cursor_ack_pending;
+	s32 cursor_pending;
+	s32 need_wait_bo_complete;
+
+	s32 clv_sock;
+
+	u8 *ipc_rx_buf;
+	u32 ipc_rx_buf_sz;
+
+	struct shm_buf bufs[2];
+	s32 back_buf;
+
+	struct clv_surface_info s;
+	struct clv_view_info v;
+	struct clv_bo_info b;
+	struct clv_commit_info c;
+	struct clv_shell_info si;
+
+	u8 *create_surface_tx_cmd_t;
+	u8 *create_surface_tx_cmd;
+	u32 create_surface_tx_len;
+
+	u8 *create_view_tx_cmd_t;
+	u8 *create_view_tx_cmd;
+	u32 create_view_tx_len;
+
+	u8 *create_bo_tx_cmd_t;
+	u8 *create_bo_tx_cmd;
+	u32 create_bo_tx_len;
+
+	u8 *commit_tx_cmd_t;
+	u8 *commit_tx_cmd;
+	u32 commit_tx_len;
+
+	u8 *terminate_tx_cmd_t;
+	u8 *terminate_tx_cmd;
+	u32 terminate_tx_len;
+
+	u8 *shell_tx_cmd_t;
+	u8 *shell_tx_cmd;
+	u32 shell_tx_len;
+
+	u64 link_id;
+
+	s32 run;
+};
+
+static void input_device_destroy(struct input_device *dev)
+{
+	if (!dev)
+		return;
+
+	clv_debug("Destroy input %s", dev->name);
+	list_del(&dev->link);
+	if (dev->input_source)
+		clv_event_source_remove(dev->input_source);
+	close(dev->fd);
+	free(dev);
+}
+
+static void destroy_shmbuf(struct input_display *disp, u32 index)
+{
+	struct shm_buf *buffer = &disp->bufs[index];
+
+	clv_shm_release(&buffer->shm);
+}
+
+static void input_display_destroy(struct input_display *disp)
+{
+	struct input_device *dev, *next;
+	s32 i;
+
+	if (!disp)
+		return;
+
+	if (disp->clv_source)
+		clv_event_source_remove(disp->clv_source);
+
+	if (disp->clv_sock > 0)
+		close(disp->clv_sock);
+
+	if (disp->create_surface_tx_cmd_t)
+		free(disp->create_surface_tx_cmd_t);
+	if (disp->create_surface_tx_cmd);
+		free(disp->create_surface_tx_cmd);
+
+	if (disp->create_view_tx_cmd_t)
+		free(disp->create_view_tx_cmd_t);
+	if (disp->create_view_tx_cmd)
+		free(disp->create_view_tx_cmd);
+
+	if (disp->create_bo_tx_cmd_t)
+		free(disp->create_bo_tx_cmd_t);
+	if (disp->create_bo_tx_cmd)
+		free(disp->create_bo_tx_cmd);
+
+	if (disp->commit_tx_cmd_t)
+		free(disp->commit_tx_cmd_t);
+	if (disp->commit_tx_cmd)
+		free(disp->commit_tx_cmd);
+
+	if (disp->shell_tx_cmd_t)
+		free(disp->shell_tx_cmd_t);
+	if (disp->shell_tx_cmd)
+		free(disp->shell_tx_cmd);
+
+	if (disp->terminate_tx_cmd_t)
+		free(disp->terminate_tx_cmd_t);
+	if (disp->terminate_tx_cmd)
+		free(disp->terminate_tx_cmd);
+
+	if (disp->ipc_rx_buf)
+		free(disp->ipc_rx_buf);
+
+	for (i = 0; i < 2; i++)
+		destroy_shmbuf(disp, i);
+
+	list_for_each_entry_safe(dev, next, &disp->devs, link) {
+		input_device_destroy(dev);
+	}
+
+	if (disp->udev_source)
+		clv_event_source_remove(disp->udev_source);
+
+	if (disp->udev)
+		udev_unref(disp->udev);
+
+	if (disp->udev_monitor)
+		udev_monitor_unref(disp->udev_monitor);
+
+	if (disp->buffer)
+		free(disp->buffer);
+
+	if (disp->tx_buf)
+		free(disp->tx_buf);
+
+	free(disp);
+}
+
+static enum input_type test_dev(const char *dev)
+{
+	s32 fd;
+	u8 evbit[EV_MAX/8 + 1];
+	char buffer[64];
+
+	fd = open(dev, O_RDWR | O_CLOEXEC, 0644);
+	if (fd < 0)
+		return INPUT_TYPE_UNKNOWN;
+
+	memset(buffer,0, sizeof(buffer));
+	ioctl(fd, EVIOCGNAME(sizeof(buffer) - 1), buffer);
+
+#ifndef test_bit
+#define test_bit(bit, array)    (array[bit/8] & (1<<(bit%8)))
+#endif
+	ioctl(fd, EVIOCGBIT(0, sizeof(evbit)), evbit);
+	close(fd);
+	if (test_bit(EV_KEY, evbit) && test_bit(EV_REL, evbit)) {
+		return INPUT_TYPE_MOUSE;
+	} else if(test_bit(EV_KEY, evbit) && test_bit(EV_REP, evbit)
+	    && test_bit(EV_LED, evbit)) {
+		return INPUT_TYPE_KBD;
+	}
+	return INPUT_TYPE_UNKNOWN;
+}
+
+static void remove_input_device(struct input_display *disp, const char *devpath)
+{
+	struct input_device *dev_present, *next;
+
+	list_for_each_entry_safe(dev_present, next, &disp->devs, link) {
+		if (!strcmp(dev_present->name, devpath)) {
+			clv_debug("Remove %s, type %s", devpath,
+				dev_present->type == INPUT_TYPE_MOUSE?"M":"K");
+			input_device_destroy(dev_present);
+			return;
+		}
+	}
+}
+
+static void redraw_cursor(struct input_display *disp, s32 damage, u8 *data,
+			  u32 w, u32 h);
+
+static void mouse_move_proc(struct input_display *disp, s32 dx, s32 dy)
+{
+	disp->abs_x += dx;
+	disp->abs_y += dy;
+	redraw_cursor(disp, 0, NULL, disp->abs_x, disp->abs_y);
+}
+
+static void event_proc(struct input_display *disp, struct input_event *evts,
+		       s32 cnt)
+{
+	s32 src, dst;
+	s32 dx, dy;
+
+	dx = dy = 0;
+	dst = 0;
+
+	for (src = 0; src < cnt; src++) {
+		switch (disp->buffer[src].type) {
+		case EV_SYN:
+			if (dx || dy) {
+				mouse_move_proc(disp, dx, dy);
+				disp->tx_buf[dst].type = EV_ABS;
+				disp->tx_buf[dst].code = ABS_X | ABS_Y;
+				disp->tx_buf[dst].v.pos.x = disp->abs_x;
+				disp->tx_buf[dst].v.pos.y = disp->abs_y;
+				disp->tx_buf[dst].v.pos.dx = (s16)dx;
+				disp->tx_buf[dst].v.pos.dy = (s16)dy;
+				dst++;
+			}
+			break;
+		case EV_MSC:
+			break;
+		case EV_LED:
+			break;
+		case EV_KEY:
+			disp->tx_buf[dst].type = EV_KEY;
+			disp->tx_buf[dst].code = disp->buffer[src].code;
+			disp->tx_buf[dst].v.value = disp->buffer[src].value;
+			dst++;
+			break;
+		case EV_REP:
+			disp->tx_buf[dst].type = EV_REP;
+			disp->tx_buf[dst].code = disp->buffer[src].code;
+			disp->tx_buf[dst].v.value = disp->buffer[src].value;
+			dst++;
+			break;
+		case EV_REL:
+			switch (disp->buffer[src].code) {
+			case REL_WHEEL:
+				disp->tx_buf[dst].type = EV_REL;
+				disp->tx_buf[dst].code = REL_WHEEL;
+				disp->tx_buf[dst].v.value =
+					disp->buffer[src].value;
+				dst++;
+				break;
+			case REL_X:
+				dx = disp->buffer[src].value;
+				break;
+			case REL_Y:
+				dy = disp->buffer[src].value;
+				break;
+			default:
+				break;
+			}
+			break;
+		default:
+			break;
+		}
+	}
+
+	// send tx_buf
+}
+
+static s32 read_input_event(s32 fd, u32 mask, void *data)
+{
+	struct input_device *dev = data;
+	struct input_display *disp = dev->disp;
+	s32 ret;
+
+	ret = read(fd, disp->buffer, disp->buffer_sz);
+	if (ret <= 0) {
+		return ret;
+	}
+	event_proc(disp, disp->buffer, ret / sizeof(struct input_event));
+
+	return 0;
+}
+
+static void add_input_device(struct input_display *disp, const char *devpath)
+{
+	struct input_device *dev, *dev_present;
+	enum input_type type;
+	s32 fd;
+
+	type = test_dev(devpath);
+	if (type == INPUT_TYPE_UNKNOWN)
+		return;
+
+	list_for_each_entry(dev_present, &disp->devs, link) {
+		if (type == dev_present->type) {
+			clv_debug("already has %s",
+				type == INPUT_TYPE_KBD?"K":"M");
+			return;
+		}
+	}
+
+	fd = open(devpath, O_RDWR | O_CLOEXEC, 0644);
+	if (fd < 0) {
+		clv_err("cannot open %s, %s", devpath, strerror(errno));
+		return;
+	}
+
+	dev = calloc(1, sizeof(*dev));
+	if (!dev)
+		return;
+	dev->fd = fd;
+	dev->type = type;
+	dev->disp = disp;
+	memset(dev->name, 0, 256);
+	strcpy(dev->name, devpath);
+	dev->input_source = clv_event_loop_add_fd(
+					disp->loop,
+					dev->fd,
+					CLV_EVT_READABLE,
+					read_input_event, dev);
+	if (!dev->input_source) {
+		close(dev->fd);
+		free(dev);
+		return;
+	}
+
+	list_add_tail(&dev->link, &disp->devs);
+	clv_debug("Add %s, type %s",
+		dev->name,type == INPUT_TYPE_MOUSE?"M":"K");
+}
+
+static s32 udev_input_hotplug_event_proc(s32 fd, u32 mask, void *data)
+{
+	struct udev_device *device;
+	struct input_display *disp = data;
+	const char *action, *devname;
+
+	device = udev_monitor_receive_device(disp->udev_monitor);
+	action = udev_device_get_property_value(device, "ACTION");
+	devname = udev_device_get_property_value(device, "DEVNAME");
+	if (action && devname) {
+		if (!strcmp(action, "add")) {
+			add_input_device(disp, devname);
+		} else if (!strcmp(action, "remove")) {
+			remove_input_device(disp, devname);
+		}
+	}
+	udev_device_unref(device);
+
+	return 0;
+}
+
+static void redraw_cursor(struct input_display *disp, s32 damage, u8 *data,
+			  u32 w, u32 h)
+{
+	struct shm_buf *buffer;
+
+	if (damage) {
+		buffer = &disp->bufs[disp->back_buf];
+		if (data) {
+			// update buffer
+			;
+		}
+	} else {
+		buffer = &disp->bufs[1 - disp->back_buf];
+	}
+
+	if (disp->need_wait_bo_complete) {
+		if (disp->cursor_pending || disp->cursor_ack_pending) {
+			return;
+		}
+	} else {
+		if (disp->cursor_ack_pending) {
+			return;
+		}
+	}
+
+	disp->c.bo_id = buffer->id;
+
+	disp->c.bo_damage.pos.x = 0;
+	disp->c.bo_damage.pos.y = 0;
+	if (damage) {
+		disp->c.bo_damage.w = buffer->w;
+		disp->c.bo_damage.h = buffer->h;
+	} else {
+		disp->c.bo_damage.w = 0;
+		disp->c.bo_damage.h = 0;
+	}
+
+	disp->c.view_x = disp->abs_x;
+	disp->c.view_y = disp->abs_y;
+
+	clv_dup_commit_req_cmd(disp->commit_tx_cmd, disp->commit_tx_cmd_t,
+			       disp->commit_tx_len, &disp->c);
+	disp->back_buf = 1 - disp->back_buf;
+	if (damage) {
+		disp->need_wait_bo_complete = 1;
+	} else {
+		disp->need_wait_bo_complete = 0;
+	}
+	disp->cursor_pending = 1;
+	disp->cursor_ack_pending = 1;
+	clv_send(disp->clv_sock, disp->commit_tx_cmd, disp->commit_tx_len);
+}
+
+static s32 clv_event_proc(s32 fd, u32 mask, void *data)
+{
+	s32 ret;
+	struct input_display *disp = data;
+	struct clv_tlv *tlv;
+	u8 *rx_p;
+	u32 flag, length;
+	u64 id;
+	static s32 bo_0_created = 0;
+
+	ret = clv_recv(fd, disp->ipc_rx_buf, sizeof(*tlv) + sizeof(u32));
+	if (ret == -1) {
+		clv_err("server exit.");
+		return -1;
+	} else if (ret < 0) {
+		clv_err("failed to receive server cmd");
+	}
+	tlv = (struct clv_tlv *)(disp->ipc_rx_buf + sizeof(u32));
+	length = tlv->length;
+	rx_p = disp->ipc_rx_buf + sizeof(u32) + sizeof(*tlv);
+	flag = *((u32 *)(disp->ipc_rx_buf));
+	ret = clv_recv(fd, rx_p, length);
+	if (ret == -1) {
+		clv_err("server exit.");
+		return -1;
+	} else if (ret < 0) {
+		clv_err("failed to receive server cmd");
+		return -1;
+	}
+
+	if (tlv->tag == CLV_TAG_INPUT) {
+		if (flag & CLV_CMD_INPUT_EVT_SHIFT) {
+
+		} else {
+			clv_err("unknown command 0x%08X, not a input cmd.",
+				flag);
+			return -1;
+		}
+	} else if (tlv->tag == CLV_TAG_WIN) {
+		if (flag & (1 << CLV_CMD_LINK_ID_ACK_SHIFT)) {
+			id = clv_client_parse_link_id(disp->ipc_rx_buf);
+			if (id == 0) {
+				clv_err("create link failed.");
+				return -1;
+			}
+			disp->link_id = id;
+			clv_debug("link_id: 0x%08lX", disp->link_id);
+			(void)clv_dup_create_surface_cmd(
+					disp->create_surface_tx_cmd,
+					disp->create_surface_tx_cmd_t,
+					disp->create_surface_tx_len,
+					&disp->s);
+			ret = clv_send(fd, disp->create_surface_tx_cmd,
+				       disp->create_surface_tx_len);
+			if (ret == -1) {
+				clv_err("server exit.");
+				return -1;
+			} else if (ret < 0) {
+				clv_err("failed to send create surface cmd");
+				return -1;
+			}
+		} else if (flag & (1 << CLV_CMD_CREATE_SURFACE_ACK_SHIFT)) {
+			id = clv_client_parse_surface_id(disp->ipc_rx_buf);
+			if (id == 0) {
+				clv_err("create surface failed.");
+				return -1;
+			}
+			disp->s.surface_id = id;
+			clv_debug("create surface ok, surface_id = 0x%08lX",
+				  disp->s.surface_id);
+			(void)clv_dup_create_view_cmd(
+					disp->create_view_tx_cmd,
+					disp->create_view_tx_cmd_t,
+					disp->create_view_tx_len,
+					&disp->v);
+			ret = clv_send(fd, disp->create_view_tx_cmd,
+				       disp->create_view_tx_len);
+			if (ret == -1) {
+				clv_err("server exit.");
+				return -1;
+			} else if (ret < 0) {
+				clv_err("failed to send create view cmd");
+				return -1;
+			}
+		} else if (flag & (1 << CLV_CMD_CREATE_VIEW_ACK_SHIFT)) {
+			id = clv_client_parse_view_id(disp->ipc_rx_buf);
+			if (id == 0) {
+				clv_err("create view failed.");
+				return -1;
+			}
+			disp->v.view_id = id;
+			clv_debug("create view ok, view_id: 0x%08lX",
+				  disp->v.view_id);
+			disp->b.stride = disp->bufs[0].stride;
+			strcpy(disp->b.name, disp->bufs[0].shm.name);
+			disp->b.surface_id = disp->s.surface_id;
+			(void)clv_dup_create_bo_cmd(
+					disp->create_bo_tx_cmd,
+					disp->create_bo_tx_cmd_t,
+					disp->create_bo_tx_len,
+					&disp->b);
+			ret = clv_send(fd, disp->create_bo_tx_cmd,
+				       disp->create_bo_tx_len);
+			if (ret == -1) {
+				clv_err("server exit.");
+				return -1;
+			} else if (ret < 0) {
+				clv_err("failed to send create bo cmd");
+				return -1;
+			}
+		} else if (flag & (1 << CLV_CMD_CREATE_BO_ACK_SHIFT)) {
+			id = clv_client_parse_bo_id(disp->ipc_rx_buf);
+			if (id == 0) {
+				clv_err("create bo failed.");
+				return -1;
+			}
+			if (!bo_0_created) {
+				disp->bufs[0].id = id;
+				clv_debug("create bo[0] ok, bo_id: 0x%08lX",
+					  disp->bufs[0].id);
+				bo_0_created = 1;
+				disp->b.stride = disp->bufs[1].stride;
+				strcpy(disp->b.name, disp->bufs[1].shm.name);
+				disp->b.surface_id = disp->s.surface_id;
+				(void)clv_dup_create_bo_cmd(
+						disp->create_bo_tx_cmd,
+						disp->create_bo_tx_cmd_t,
+						disp->create_bo_tx_len,
+						&disp->b);
+				ret = clv_send(fd, disp->create_bo_tx_cmd,
+					       disp->create_bo_tx_len);
+				if (ret == -1) {
+					clv_err("server exit.");
+					return -1;
+				} else if (ret < 0) {
+					clv_err("failed to send create bo cmd");
+					return -1;
+				}
+			} else {
+				disp->bufs[1].id = id;
+				clv_debug("create bo[1] ok, bo_id: 0x%08lX",
+					  disp->bufs[1].id);
+				clv_debug("Start to draw.");
+				redraw_cursor(disp, 1, NULL, 0, 0);
+			}
+		} else if (flag & (1 << CLV_CMD_COMMIT_ACK_SHIFT)) {
+			// clv_debug("receive commit ack.");
+			clv_client_parse_commit_ack_cmd(disp->ipc_rx_buf);
+			disp->cursor_ack_pending = 0;
+		} else if (flag & (1 << CLV_CMD_BO_COMPLETE_SHIFT)) {
+			clv_debug("receive bo complete.");
+			id = clv_client_parse_bo_complete_cmd(disp->ipc_rx_buf);
+			disp->cursor_pending = 0;
+		} else if (flag & (1 << CLV_CMD_SHELL_SHIFT)) {
+			clv_debug("receive shell event");
+		} else if (flag & (1 << CLV_CMD_DESTROY_ACK_SHIFT)) {
+			clv_debug("receive destroy ack");
+		} else {
+			clv_err("unknown command 0x%08X", flag);
+			return -1;
+		}
+	} else {
+		clv_err("command is not a win/input command");
+		return -1;
+	}
+
+	return 0;
+}
+
+static void create_shmbuf(struct input_display *disp, u32 index, u32 w, u32 h)
+{
+	char name[32];
+	struct shm_buf *buffer = &disp->bufs[index];
+	struct clv_shm *shm;
+	s32 i, j;
+	const u32 red = 0xFFFF0000;
+	const u32 green = 0xFF00FF00;
+	const u32 blue = 0xFF0000FF;
+	const u32 yellow = 0xFFFFFF00;
+	u32 *map;
+
+	memset(name, 0, 32);
+	sprintf(name, "clover_input-%u", index);
+	if (w % 4)
+		w = w / 4 + 1;
+	buffer->w = w;
+	buffer->h = h;
+	buffer->stride = w * 4;
+	clv_shm_init(&buffer->shm, name, buffer->stride * buffer->h, 1);
+	shm = &buffer->shm;
+	map = (u32 *)(shm->map);
+	for (i = 0; i < buffer->w / 2; i++) {
+		for (j = 0; j < buffer->h / 2; j++) {
+			*(map + i * buffer->stride / 4 + j) = red;
+		}
+	}
+	for (i = 0; i < buffer->w / 2; i++) {
+		for (j = buffer->h / 2; j < buffer->h; j++) {
+			*(map + i * buffer->stride / 4 + j) = blue;
+		}
+	}
+	for (i = buffer->w / 2; i < buffer->w; i++) {
+		for (j = 0; j < buffer->h / 2; j++) {
+			*(map + i * buffer->stride / 4 + j) = green;
+		}
+	}
+	for (i = buffer->w / 2; i < buffer->w; i++) {
+		for (j = buffer->h / 2; j < buffer->h; j++) {
+			*(map + i * buffer->stride / 4 + j) = yellow;
+		}
+	}
+}
+
+static void scan_input_devs(struct input_display * disp, const char *input_dir)
+{
+	char *devname;
+	char *filename;
+	DIR *dir;
+	struct dirent *de;
+	enum input_type type;
+
+	dir = opendir(input_dir);
+	if(dir == NULL)
+		return;
+
+	devname = (char *)malloc(1024);
+	memset(devname, 0, 1024);
+	strcpy(devname, input_dir);
+	filename = devname + strlen(devname);
+	*filename++ = '/';
+
+	while ((de = readdir(dir))) {
+		if(de->d_name[0] == '.' &&
+			(de->d_name[1] == '\0' ||
+			(de->d_name[1] == '.' && de->d_name[2] == '\0')))
+			continue;
+
+		strcpy(filename, de->d_name);
+		type = test_dev(devname);
+		if (type == INPUT_TYPE_UNKNOWN)
+			continue;
+		add_input_device(disp, devname);
+	}
+
+	closedir(dir);
+	free(devname);
+}
+
+static struct input_display *input_display_create(void)
+{
+	struct input_display *disp = calloc(1, sizeof(*disp));
+	u32 n;
+	s32 i;
+
+	if (!disp)
+		goto err;
+
+	disp->buffer_sz = sizeof(struct input_event) * 1024;
+	disp->buffer = (struct input_event *)malloc(disp->buffer_sz);
+	if (!disp->buffer)
+		goto err;
+
+	memset(disp->buffer, 0, disp->buffer_sz);
+
+	disp->tx_buf_sz = sizeof(struct clv_input_event) * 1024;
+	disp->tx_buf = (struct clv_input_event *)malloc(disp->tx_buf_sz);
+	if (!disp->tx_buf)
+		goto err;
+
+	memset(disp->tx_buf, 0, disp->tx_buf_sz);
+
+	disp->loop = clv_event_loop_create();
+	if (!disp->loop)
+		goto err;
+
+	disp->udev = udev_new();
+	if (!disp->udev)
+		goto err;
+
+	disp->udev_monitor = udev_monitor_new_from_netlink(disp->udev, "udev");
+	if (!disp->udev_monitor)
+		goto err;
+
+	udev_monitor_filter_add_match_subsystem_devtype(disp->udev_monitor,
+							"input", NULL);
+	udev_monitor_enable_receiving(disp->udev_monitor);
+
+	disp->udev_source = clv_event_loop_add_fd(
+					disp->loop,
+					udev_monitor_get_fd(disp->udev_monitor),
+					CLV_EVT_READABLE,
+					udev_input_hotplug_event_proc, disp);
+	if (!disp->udev_source)
+		goto err;
+
+	INIT_LIST_HEAD(&disp->devs);
+
+	disp->clv_sock = clv_socket_cloexec(PF_LOCAL, SOCK_STREAM, 0);
+	if (disp->clv_sock < 0)
+		goto err;
+
+	disp->clv_source = clv_event_loop_add_fd(disp->loop,
+						 disp->clv_sock,
+						 CLV_EVT_READABLE,
+						 clv_event_proc,
+						 disp);
+	if (!disp->clv_source)
+		goto err;
+
+	for (i = 0; i < 2; i++)
+		create_shmbuf(disp, i, CURSOR_MAX_WIDTH, CURSOR_MAX_HEIGHT);
+
+	disp->back_buf = 0;
+
+	disp->ipc_rx_buf_sz = 32 * 1024;
+	disp->ipc_rx_buf = malloc(disp->ipc_rx_buf_sz);
+	if (!disp->ipc_rx_buf)
+		goto err;
+
+	disp->s.is_opaque = 0;
+	disp->s.damage.pos.x = 0;
+	disp->s.damage.pos.y = 0;
+	disp->s.damage.w = CURSOR_MAX_WIDTH;
+	disp->s.damage.h = CURSOR_MAX_HEIGHT;
+	disp->s.opaque.pos.x = 0;
+	disp->s.opaque.pos.y = 0;
+	disp->s.opaque.w = CURSOR_MAX_WIDTH;
+	disp->s.opaque.h = CURSOR_MAX_HEIGHT;
+	disp->s.width = CURSOR_MAX_WIDTH;
+	disp->s.height = CURSOR_MAX_HEIGHT;
+	disp->v.type = CLV_VIEW_TYPE_CURSOR;
+	disp->v.area.pos.x = disp->abs_x;
+	disp->v.area.pos.y = disp->abs_y;
+	disp->v.area.w = CURSOR_MAX_WIDTH;
+	disp->v.area.h = CURSOR_MAX_HEIGHT;
+	disp->v.alpha = 1.0f;
+	disp->v.output_mask = 0x03;
+	disp->v.primary_output = 0;
+	disp->b.type = CLV_BUF_TYPE_SHM;
+	disp->b.fmt = CLV_PIXEL_FMT_ARGB8888;
+	disp->b.count_planes = 1;
+	disp->b.internal_fmt = 0;
+	disp->b.width = disp->s.width;
+	disp->b.stride = (disp->s.width % 4) ?
+			(disp->s.width / 4 + 1) * 4 : disp->s.width * 4;
+	disp->b.height = disp->s.height;
+	disp->c.shown = 1;
+	disp->c.view_x = disp->abs_x;
+	disp->c.view_y = disp->abs_y;
+	disp->c.view_width = CURSOR_MAX_WIDTH;
+	disp->c.view_height = CURSOR_MAX_HEIGHT;
+	disp->c.delta_z = 0;
+
+	disp->create_surface_tx_cmd_t = clv_client_create_surface_cmd(
+						&disp->s, &n);
+	disp->create_surface_tx_cmd = malloc(n);
+	disp->create_surface_tx_len = n;
+
+	disp->create_view_tx_cmd_t = clv_client_create_view_cmd(&disp->v, &n);
+	disp->create_view_tx_cmd = malloc(n);
+	disp->create_view_tx_len = n;
+
+	disp->create_bo_tx_cmd_t = clv_client_create_bo_cmd(&disp->b, &n);
+	disp->create_bo_tx_cmd = malloc(n);
+	disp->create_bo_tx_len = n;
+
+	disp->commit_tx_cmd_t = clv_client_create_commit_req_cmd(&disp->c, &n);
+	disp->commit_tx_cmd = malloc(n);
+	disp->commit_tx_len = n;
+
+	disp->shell_tx_cmd_t = clv_create_shell_cmd(&disp->si, &n);
+	disp->shell_tx_cmd = malloc(n);
+	disp->shell_tx_len = n;
+
+	disp->terminate_tx_cmd_t = clv_client_create_destroy_cmd(0, &n);
+	disp->terminate_tx_cmd = malloc(n);
+	disp->terminate_tx_len = n;
+
+	disp->abs_x = disp->abs_y = 0;
+	disp->cursor_pending = 0;
+
+	disp->run = 1;
+
+	clv_socket_connect(disp->clv_sock, "/tmp/CLV_SERVER");
+
+	return disp;
+
+err:
+	input_display_destroy(disp);
+	return NULL;
+}
+
+static void input_display_run(struct input_display *disp)
+{
+	while (disp->run) {
+		clv_event_loop_dispatch(disp->loop, -1);
+	}
+}
+
+s32 main(s32 argc, char **argv)
+{
+	struct input_display *disp = input_display_create();
+
+	if (!disp)
+		return -1;
+
+	scan_input_devs(disp, "/dev/input");
+	input_display_run(disp);
+
+	input_display_destroy(disp);
+	return 0;
+}
+

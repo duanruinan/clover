@@ -78,7 +78,6 @@ struct clv_config {
 	enum clv_desktop_mode mode;
 	s32 count_heads;
 	struct clv_head_config heads[8];
-	struct clv_rect rects[8];
 };
 
 struct clv_config *load_config_from_file(const char *xml);
@@ -155,9 +154,12 @@ struct clv_view {
 	enum clv_view_type type;
 	struct clv_plane *plane;
 	struct clv_surface *surface;
+	struct clv_buffer *cursor_buf; /* used for cursor */
 	struct list_head link;
 	struct clv_rect area; /* in canvas coordinates */
 	float alpha;
+	void *last_dmafb;
+	void *curr_dmafb;
 	u32 output_mask;
 	s32 painted;
 	s32 need_to_draw;
@@ -206,6 +208,9 @@ struct clv_compositor {
 	struct clv_surface bg_surf;
 	struct clv_view bg_view;
 	struct shm_buffer bg_buf;
+
+	struct clv_surface dummy_cursor_surf;
+	struct clv_view dummy_cursor_view;
 };
 
 struct clv_backend {
@@ -250,6 +255,9 @@ struct clv_backend {
 	 */
 	struct clv_output * (*output_create)(struct clv_compositor *c,
 					     struct clv_head_config *head_cfg);
+	void * (*import_dmabuf)(struct clv_compositor *c,
+				struct clv_buffer *buffer);
+	void (*dmabuf_destroy)(void *buffer);
 };
 
 void set_scanout_dbg(u32 flag);
@@ -439,6 +447,7 @@ void clv_display_destroy(struct clv_display *display);
 void clv_compositor_choose_mode(struct clv_output *output,
 				struct clv_head_config *head_cfg);
 void clv_output_schedule_repaint(struct clv_output *output, s32 cnt);
+void clv_output_schedule_repaint_reset(struct clv_output *output);
 void clv_compositor_schedule_repaint(struct clv_compositor *c);
 void clv_surface_schedule_repaint(struct clv_surface *surface);
 void clv_view_schedule_repaint(struct clv_view *view);

@@ -793,29 +793,39 @@ static void gl_attach_dma_buffer(struct clv_surface *surface,
 	struct gl_surface_state *gs = get_surface_state(surface);
 	struct dma_buffer *dmabuf = container_of(buffer, struct dma_buffer,
 						 base);
+	struct timespec t1, t2;
 
+	clock_gettime(c->clk_id, &t1);
 	assert(dmabuf);
 	if (buffer->pixel_fmt == CLV_PIXEL_FMT_XRGB8888) {
+		gs->target = GL_TEXTURE_2D;
 		surface->is_opaque = 1;
+		gs->shader = &disp->texture_shader_rgba;
+		gs->pitch = buffer->stride / 4;
 	} else if (buffer->pixel_fmt == CLV_PIXEL_FMT_ARGB8888) {
+		gs->target = GL_TEXTURE_2D;
 		surface->is_opaque = 0;
+		gs->shader = &disp->texture_shader_rgba;
+		gs->pitch = buffer->stride / 4;
+	} else if (buffer->pixel_fmt == CLV_PIXEL_FMT_NV12
+	        || buffer->pixel_fmt == CLV_PIXEL_FMT_NV16) {
+		gs->target = GL_TEXTURE_EXTERNAL_OES;
+		surface->is_opaque = 1;
+		gs->shader = &disp->texture_shader_egl_external;
+		gs->pitch = buffer->stride;
 	} else {
 		clv_err("illegal pixel fmt %u", buffer->pixel_fmt);
 		return;
 	}
-	gs->target = GL_TEXTURE_2D;
-	//gs->target = GL_TEXTURE_EXTERNAL_OES;
 	alloc_textures(gs, 1);
 	glActiveTexture(GL_TEXTURE0);
 	glBindTexture(gs->target, gs->textures[0]);
 	disp->image_target_texture_2d(gs->target, dmabuf->image);
-	gs->shader = &disp->texture_shader_rgba;
-	//gs->shader = &disp->texture_shader_egl_external;
-	gs->pitch = buffer->stride / 4;
 	gs->h = buffer->h;
 	gs->buf_type = CLV_BUF_TYPE_DMA;
 	gs->y_inverted = 1;
 	gs->surface = surface;
+	clock_gettime(c->clk_id, &t2);
 }
 
 static void gl_attach_shm_buffer(struct clv_surface *surface,
@@ -828,12 +838,14 @@ static void gl_attach_shm_buffer(struct clv_surface *surface,
 	GLenum gl_pixel_type;
 	s32 pitch;
 	s32 count_planes;
+	struct timespec t1, t2;
 
 	count_planes = 1;
 	gs->offset[0] = 0;
 	gs->hsub[0] = 1;
 	gs->vsub[0] = 1;
 
+	clock_gettime(c->clk_id, &t1);
 	switch (buffer->pixel_fmt) {
 	case CLV_PIXEL_FMT_XRGB8888:
 		gs->shader = &disp->texture_shader_rgbx;
@@ -922,6 +934,7 @@ static void gl_attach_shm_buffer(struct clv_surface *surface,
 		gs->buf_type = CLV_BUF_TYPE_SHM;
 		alloc_textures(gs, count_planes);
 	}
+	clock_gettime(c->clk_id, &t2);
 }
 
 static void gl_attach_buffer(struct clv_surface *surface,
@@ -1467,12 +1480,6 @@ static void gl_repaint_output(struct clv_output *output)
 	s32 left, top, calc;
 	u32 width, height;
 
-	if (output->changed) {
-		glViewport(0, 0, output->current_mode->w,
-			   output->current_mode->h);
-		glClear(GL_COLOR_BUFFER_BIT);
-		output->changed = 0;
-	}
 	calc = output->current_mode->w * output->render_area.h
 		/ output->render_area.w;
 	if (calc <= output->current_mode->h) {
@@ -1494,6 +1501,21 @@ static void gl_repaint_output(struct clv_output *output)
 
 	//glViewport(0, 0, area->w, area->h);
 	//gles_debug("%d,%d %ux%u", 0, 0, area->w, area->h);
+	if (output->changed) {
+		if (left) {
+			glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+			glClear(GL_COLOR_BUFFER_BIT);
+			glViewport(0, 0, left - 1, height);
+			glViewport(left + width, 0, left - 1, height);
+		}
+		if (top) {
+			glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+			glClear(GL_COLOR_BUFFER_BIT);
+			glViewport(left, 0, width, top - 1);
+			glViewport(left, top + height, width, top - 1);
+		}
+		output->changed--;
+	}
 	glViewport(left, top, width, height);
 	gles_debug("%d,%d %ux%u %ux%u", left, top, width, height,
 		 output->current_mode->w, output->current_mode->h);
@@ -1768,6 +1790,7 @@ static void gl_dmabuf_release(struct clv_compositor *c,
 	}
 
 	printf("close fd %d\n", buffer->fd);
+	// TODO free GEM
 	close(buffer->fd);
 
 	list_del(&dma_buf->link);
@@ -1785,6 +1808,7 @@ static struct clv_buffer *gl_import_dmabuf(struct clv_compositor *c,
 	struct dma_buffer *dma_buf = NULL;
 	EGLint attribs[50] = {0};
 	s32 attrib = 0;
+	u32 w_align, h_align;
 
 	printf("fd = %d stride = %u width = %u\n", fd, stride, w);
 	if (!disp->support_dmabuf_import) {
@@ -1793,7 +1817,9 @@ static struct clv_buffer *gl_import_dmabuf(struct clv_compositor *c,
 	}
 
 	if (pixel_fmt != CLV_PIXEL_FMT_ARGB8888
-	    && pixel_fmt != CLV_PIXEL_FMT_ARGB8888) {
+	    && pixel_fmt != CLV_PIXEL_FMT_ARGB8888
+	    && pixel_fmt != CLV_PIXEL_FMT_NV12
+	    && pixel_fmt != CLV_PIXEL_FMT_NV16) {
 		clv_err("cannot support pixel fmt %u", pixel_fmt);
 		return NULL;
 	}
@@ -1810,21 +1836,83 @@ static struct clv_buffer *gl_import_dmabuf(struct clv_compositor *c,
 	dma_buf->base.count_planes = 1;
 	dma_buf->base.fd = fd;
 
-	attribs[attrib++] = EGL_WIDTH;
-	attribs[attrib++] = w;
-	attribs[attrib++] = EGL_HEIGHT;
-	attribs[attrib++] = h;
-	attribs[attrib++] = EGL_LINUX_DRM_FOURCC_EXT;
-	attribs[attrib++] = internal_fmt;
-	attribs[attrib++] = EGL_DMA_BUF_PLANE0_FD_EXT;
-	attribs[attrib++] = fd;
-	attribs[attrib++] = EGL_DMA_BUF_PLANE0_OFFSET_EXT;
-	attribs[attrib++] = 0;
-	attribs[attrib++] = EGL_DMA_BUF_PLANE0_PITCH_EXT;
-	attribs[attrib++] = stride;
-	attribs[attrib++] = EGL_NONE;
-	printf("w = %u h = %u fd = %d pixel_fmt = %u stride = %u\n",
-		w, h, fd, pixel_fmt, stride);
+	if (dma_buf->base.pixel_fmt == CLV_PIXEL_FMT_ARGB8888
+	    || dma_buf->base.pixel_fmt == CLV_PIXEL_FMT_XRGB8888) {
+		attribs[attrib++] = EGL_WIDTH;
+		attribs[attrib++] = w;
+		attribs[attrib++] = EGL_HEIGHT;
+		attribs[attrib++] = h;
+		attribs[attrib++] = EGL_LINUX_DRM_FOURCC_EXT;
+		attribs[attrib++] = internal_fmt;
+		attribs[attrib++] = EGL_DMA_BUF_PLANE0_FD_EXT;
+		attribs[attrib++] = fd;
+		attribs[attrib++] = EGL_DMA_BUF_PLANE0_OFFSET_EXT;
+		attribs[attrib++] = 0;
+		attribs[attrib++] = EGL_DMA_BUF_PLANE0_PITCH_EXT;
+		attribs[attrib++] = stride;
+		attribs[attrib++] = EGL_NONE;
+		printf("w = %u h = %u fd = %d pixel_fmt = %u stride = %u\n",
+			w, h, fd, pixel_fmt, stride);
+	} else if (dma_buf->base.pixel_fmt == CLV_PIXEL_FMT_NV12) {
+		w_align = (w + 16 - 1) & ~(16 - 1);
+		h_align = (h + 16 - 1) & ~(16 - 1);
+		attribs[attrib++] = EGL_WIDTH;
+		attribs[attrib++] = w;
+		attribs[attrib++] = EGL_HEIGHT;
+		attribs[attrib++] = h;
+		attribs[attrib++] = EGL_LINUX_DRM_FOURCC_EXT;
+		attribs[attrib++] = internal_fmt;
+		attribs[attrib++] = EGL_DMA_BUF_PLANE0_FD_EXT;
+		attribs[attrib++] = fd;
+		attribs[attrib++] = EGL_DMA_BUF_PLANE0_OFFSET_EXT;
+		attribs[attrib++] = 0;
+		attribs[attrib++] = EGL_DMA_BUF_PLANE0_PITCH_EXT;
+		attribs[attrib++] = w_align;
+		attribs[attrib++] = EGL_DMA_BUF_PLANE1_FD_EXT;
+		attribs[attrib++] = fd;
+		attribs[attrib++] = EGL_DMA_BUF_PLANE1_OFFSET_EXT;
+		attribs[attrib++] = w_align * h_align;
+		attribs[attrib++] = EGL_DMA_BUF_PLANE1_PITCH_EXT;
+		attribs[attrib++] = w_align;
+		attribs[attrib++] = EGL_YUV_COLOR_SPACE_HINT_EXT;
+		attribs[attrib++] = EGL_ITU_REC709_EXT;
+		attribs[attrib++] = EGL_SAMPLE_RANGE_HINT_EXT;
+		attribs[attrib++] = EGL_YUV_FULL_RANGE_EXT;
+		attribs[attrib++] = EGL_NONE;
+		printf("fourcc = %u !!!!!!!!!!\n", internal_fmt);
+		printf("w = %u h = %u fd = %d pixel_fmt = %u stride = %u\n",
+			w, h, fd, pixel_fmt, w_align);
+	} else if (dma_buf->base.pixel_fmt == CLV_PIXEL_FMT_NV16) {
+		w_align = (w + 16 - 1) & ~(16 - 1);
+		h_align = (h + 16 - 1) & ~(16 - 1);
+		attribs[attrib++] = EGL_WIDTH;
+		attribs[attrib++] = w;
+		attribs[attrib++] = EGL_HEIGHT;
+		attribs[attrib++] = h;
+		attribs[attrib++] = EGL_LINUX_DRM_FOURCC_EXT;
+		attribs[attrib++] = internal_fmt;
+		attribs[attrib++] = EGL_DMA_BUF_PLANE0_FD_EXT;
+		attribs[attrib++] = fd;
+		attribs[attrib++] = EGL_DMA_BUF_PLANE0_OFFSET_EXT;
+		attribs[attrib++] = 0;
+		attribs[attrib++] = EGL_DMA_BUF_PLANE0_PITCH_EXT;
+		attribs[attrib++] = w_align;
+		attribs[attrib++] = EGL_DMA_BUF_PLANE1_FD_EXT;
+		attribs[attrib++] = fd;
+		attribs[attrib++] = EGL_DMA_BUF_PLANE1_OFFSET_EXT;
+		attribs[attrib++] = w_align * h_align;
+		attribs[attrib++] = EGL_DMA_BUF_PLANE1_PITCH_EXT;
+		attribs[attrib++] = w_align;
+		attribs[attrib++] = EGL_YUV_COLOR_SPACE_HINT_EXT;
+		attribs[attrib++] = EGL_ITU_REC709_EXT;
+		attribs[attrib++] = EGL_SAMPLE_RANGE_HINT_EXT;
+		attribs[attrib++] = EGL_YUV_FULL_RANGE_EXT;
+		attribs[attrib++] = EGL_NONE;
+		printf("fourcc = %u !!!!!!!!!!\n", internal_fmt);
+		printf("w = %u h = %u fd = %d pixel_fmt = %u stride = %u\n",
+			w, h, fd, pixel_fmt, w_align);
+	}
+
 	dma_buf->image = disp->create_image(disp->egl_display,
 					    EGL_NO_CONTEXT,
 					    EGL_LINUX_DMA_BUF_EXT,

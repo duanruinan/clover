@@ -159,6 +159,7 @@ struct drm_plane {
 	},
 };
 
+#if 0
 void create_dumb_nv24(s32 fd, u32 width, u32 height, u32 *fb_id, unsigned char **map_y, unsigned char **map_uv)
 {
 	struct drm_mode_create_dumb create_arg_y, create_arg_uv;
@@ -192,15 +193,16 @@ void create_dumb_nv24(s32 fd, u32 width, u32 height, u32 *fb_id, unsigned char *
 
 	handles[0] = create_arg_y.handle;
 	strides[0] = create_arg_y.pitch;
+	printf("y pitch = %u\n", strides[0]);
 	offsets[0] = 0;
-	printf("y stride = %u\n", strides[0]);
 	size = create_arg_y.size;
 	printf("y size %u %u\n", size, width * height);
 
+	offsets[1] = 0;
 	handles[1] = create_arg_uv.handle;
 	strides[1] = create_arg_uv.pitch;
+	printf("uv pitch = %u\n", strides[1]);
 	offsets[1] = 0;
-	printf("uv stride = %u\n", strides[1]);
 	size = create_arg_uv.size;
 	printf("uv size %u %u\n", size, width * height * 2);
 
@@ -238,6 +240,61 @@ void create_dumb_nv24(s32 fd, u32 width, u32 height, u32 *fb_id, unsigned char *
 	if ((*map_uv) == MAP_FAILED)
 		printf("failed to map dumb uv\n");
 }
+#else
+void create_dumb_nv24(s32 fd, u32 width, u32 height, u32 *fb_id, unsigned char **map_yuv)
+{
+	struct drm_mode_create_dumb create_arg;
+	struct drm_mode_destroy_dumb destroy_arg;
+	struct drm_mode_map_dumb map_arg;
+	u32 handles[4] = {0, 0, 0, 0}, strides[4] = {0, 0, 0, 0}, offsets[4] = {0, 0, 0, 0};
+	u32 size;
+	s32 ret;
+	void *map;
+
+	memset(&create_arg, 0, sizeof create_arg);
+	create_arg.bpp = 8;
+	create_arg.width = width;
+	create_arg.height = height * 3;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &create_arg);
+	if (ret)
+		printf("failed to create dumb\n");
+	else
+		printf("create dumb ok\n");
+
+	offsets[0] = 0;
+	handles[0] = create_arg.handle;
+	strides[0] = create_arg.pitch;
+	printf("y pitch = %u\n", strides[0]);
+	printf("size = %u %u\n", create_arg.size, create_arg.size / 3);
+	size = create_arg.size;
+
+	offsets[1] = strides[0] * height;
+	handles[1] = handles[0];
+	strides[1] = strides[0] * 2;
+	printf("uv pitch = %u\n", strides[1]);
+
+	ret = drmModeAddFB2(fd, width, height, DRM_FORMAT_NV24,
+			    handles, strides, offsets, fb_id,
+			    0);
+	if (ret < 0)
+		printf("failed to add fb2 %s\n", strerror(errno));
+	else
+		printf("create nv24 drm fb ok\n");
+
+	memset(&map_arg, 0, sizeof map_arg);
+	map_arg.handle = handles[0];
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &map_arg);
+	if (ret)
+		printf("failed to map dumb\n");
+	else
+		printf("map ok\n");
+
+	*map_yuv = mmap(NULL, create_arg.size, PROT_WRITE,
+		       MAP_SHARED, fd, map_arg.offset);
+	if ((*map_yuv) == MAP_FAILED)
+		printf("failed to map dumb y\n");
+}
+#endif
 
 void *create_dumb(s32 fd, u32 width, u32 height, u32 format, u32 *fb_id, u32 *h)
 {
@@ -297,7 +354,7 @@ s32 main(s32 argc, char **argv)
 	u32 mode_blob_id;
 	u32 b, flags, format;
 	u32 handle;
-	unsigned char *map_y, *map_uv;
+	unsigned char *map_y, *map_uv, *map_yuv;
 
 	width = atoi(argv[1]);
 	height = atoi(argv[2]);
@@ -325,8 +382,13 @@ s32 main(s32 argc, char **argv)
 		assert(planes[i].plane);
 	}
 
+#if 0
 	create_dumb_nv24(fd, width, height, &fb_id, &map_y, &map_uv);
 	printf("map y = %p, map uv = %p fb_id = %u\n", map_y, map_uv, fb_id);
+#else
+	create_dumb_nv24(fd, width, height, &fb_id, &map_yuv);
+	printf("map yuv = %p fb_id = %u\n", map_yuv, fb_id);
+#endif
 
 	if (cursor_width) {
 	cursor = create_dumb(fd, cursor_width, cursor_height, DRM_FORMAT_XRGB8888, &fb_id_cursor, &handle);

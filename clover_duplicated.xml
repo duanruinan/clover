@@ -13,11 +13,7 @@
 		head's index indicate the physical connector of graphic card.
 	-->
 	<head index="0" max_width="4096" max_height="2160">
-		<!-- encoder indicate HDMI/DP/DVI/VGA -->
 		<encoder index="0" />
-		<!--
-			output's index indicate the physical LCDC/CRTC
-		-->
 		<output index="0" max_width="4096" max_height="2160" count_layers="4" def_rect="0,0/1920x1080">
 			<hw_layer index="3" type="overlay" count_formats="2">
 				<format>XRGB8888</format>

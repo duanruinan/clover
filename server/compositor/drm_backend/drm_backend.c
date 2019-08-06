@@ -38,10 +38,12 @@
 #include <clover_region.h>
 #include <clover_compositor.h>
 
-static u8 drm_dbg = 15;
-static u8 gbm_dbg = 15;
-static u8 timer_dbg = 15;
-static u8 ps_dbg = 15;
+static u8 drm_dbg = 5;
+static u8 gbm_dbg = 5;
+static u8 timer_dbg = 5;
+static u8 ps_dbg = 5;
+
+//#define DMABUF_DEBUG 1
 
 struct clv_renderer *gl_renderer = NULL;
 
@@ -176,6 +178,7 @@ struct drm_fb {
 	u32 offsets[4];
 	u32 w, h;
 	s32 fd;
+	s32 dma_fd;
 	u32 drm_fmt;
 
 	struct gbm_bo *bo;
@@ -295,6 +298,9 @@ struct drm_output {
 	struct list_head planes;
 	struct drm_plane *primary_plane;
 	struct drm_plane *cursor_plane;
+
+	struct drm_fb *cursor_fb[2];
+	s32 cursor_index;
 
 	s32 disable_pending;
 	s32 atomic_complete_pending;
@@ -498,16 +504,93 @@ static void drm_fb_destroy(struct drm_fb *fb)
 
 static struct drm_fb *drm_fb_ref(struct drm_fb *fb)
 {
+	if (!fb)
+		return NULL;
+
 	drm_debug("[FB] ref+ %p", fb);
+	drm_debug("[FB] ref result %u", fb->refcnt+1);
 	fb->refcnt++;
 	return fb;
 }
 
 static void drm_fb_destroy_dmabuf(struct drm_fb *fb)
 {
-	if (fb->bo)
-		gbm_bo_destroy(fb->bo);
+	struct drm_gem_close req;
+
+	if (fb->handles[0]) {
+		drm_debug("close GEM");
+		memset(&req, 0, sizeof(req));
+		req.handle = fb->handles[0];
+		drmIoctl(fb->fd, DRM_IOCTL_GEM_CLOSE, &req);
+		close(fb->dma_fd);
+	}
 	drm_fb_destroy(fb);
+}
+
+static struct drm_fb *drm_fb_get_from_dmabuf(struct clv_buffer *buffer,
+					     struct drm_backend *b)
+{
+	struct drm_fb *fb;
+	s32 ret;
+	u32 w_align, h_align;
+
+	if (!buffer)
+		return NULL;
+
+	fb = calloc(1, sizeof(*fb));
+	if (!fb)
+		return NULL;
+
+	fb->refcnt = 1;
+	fb->type = DRM_BUF_DMABUF;
+
+	ret = drmPrimeFDToHandle(b->fd, buffer->fd, &fb->handles[0]);
+	if (ret) {
+		drm_err("drmPrimeFDToHandle failed. fd = %d. %s", buffer->fd,
+			strerror(errno));
+		free(fb);
+		return NULL;
+	}
+
+	fb->w = buffer->w;
+	w_align = (buffer->w + 16 - 1) & ~(16 - 1);
+	fb->h = buffer->h;
+	h_align = (buffer->h + 16 - 1) & ~(16 - 1);
+	fb->dma_fd = buffer->fd;
+	fb->fd = b->fd;
+	fb->bo = NULL;
+
+	switch (buffer->pixel_fmt) {
+	case CLV_PIXEL_FMT_NV12:
+		fb->drm_fmt = DRM_FORMAT_NV12;
+		fb->size = w_align * h_align * 3 / 2;
+		fb->offsets[0] = 0;
+		fb->strides[0] = w_align;
+		fb->handles[1] = fb->handles[0];
+		fb->offsets[1] = w_align * h_align;
+		fb->strides[1] = w_align;
+		break;
+	case CLV_PIXEL_FMT_NV24:
+		fb->drm_fmt = DRM_FORMAT_NV24;
+		fb->size = w_align * h_align * 3;
+		fb->offsets[0] = 0;
+		fb->strides[0] = w_align;
+		fb->handles[1] = fb->handles[0];
+		fb->offsets[1] = w_align * h_align;
+		fb->strides[1] = w_align * 2;
+		break;
+	default:
+		free(fb);
+		return NULL;
+	}
+
+	if (drm_fb_addfb(b, fb) < 0) {
+		drm_err("drm_fb_addfb failed.");
+		free(fb);
+		return NULL;
+	}
+
+	return fb;
 }
 
 static void drm_fb_unref(struct drm_fb *fb)
@@ -515,6 +598,7 @@ static void drm_fb_unref(struct drm_fb *fb)
 	drm_debug("[FB] unref- %p", fb);
 	if (!fb)
 		return;
+	drm_debug("[FB] unref result %u", fb->refcnt - 1);
 
 	assert(fb->refcnt > 0);
 	if (--fb->refcnt > 0)
@@ -522,18 +606,38 @@ static void drm_fb_unref(struct drm_fb *fb)
 
 	switch (fb->type) {
 	case DRM_BUF_CURSOR:
+		drm_debug("[FB] Real destroy cursor bo");
+		//printf("[FB] Real destroy cursor bo\n");
 		gbm_bo_destroy(fb->bo);
 		break;
 	case DRM_BUF_GBM_SURFACE:
+		drm_debug("[FB] Real destroy gbm bo");
 		gbm_surface_release_buffer(fb->gbm_surface, fb->bo);
 		break;
 	case DRM_BUF_DMABUF:
+		drm_debug("[FB] Real destroy dmabuf bo");
+		//printf("[FB] Real destroy dmabuf bo\n");
 		drm_fb_destroy_dmabuf(fb);
 		break;
 	default:
 		assert(NULL);
 		break;
 	}
+}
+
+static void drm_dmabuf_destroy(void *buffer)
+{
+	struct drm_fb *fb = buffer;
+
+	drm_fb_unref(fb);
+}
+
+static void *drm_import_dmabuf(struct clv_compositor *c,
+			       struct clv_buffer *buffer)
+{
+	struct drm_backend *b = to_drm_backend(c);
+
+	return drm_fb_get_from_dmabuf(buffer, b);
 }
 
 static s32 drm_output_disable(struct clv_output *base);
@@ -552,9 +656,10 @@ static void drm_output_update_complete(struct drm_output *output,
 	drm_output_state_free(output->state_last);
 	output->state_last = NULL;
 
+	drm_debug("output->disable_pending = %u", output->disable_pending);
 	if (output->disable_pending) {
-		output->disable_pending = 0;
 		drm_output_disable(&output->base);
+		output->disable_pending = 0;
 		return;
 	} else if (output->state_cur->dpms == CLV_DPMS_OFF &&
 	           output->base.repaint_status != REPAINT_AWAITING_COMPLETION) {
@@ -791,7 +896,8 @@ static void drm_plane_state_free(struct drm_plane_state *state, s32 force)
 	if (!state)
 		return;
 
-	ps_debug("plane state free %p", state);
+	ps_debug("plane %u state free %p cur state %p", state->plane->index,
+		 state, state->plane->state_cur);
 	list_del(&state->link);
 	INIT_LIST_HEAD(&state->link);
 	state->output_state = NULL;
@@ -809,6 +915,7 @@ static void drm_output_state_free(struct drm_output_state *state)
 	if (!state)
 		return;
 
+	ps_debug("free output %u's state", state->output->index);
 	list_for_each_entry_safe(ps, next, &state->plane_states, link)
 		drm_plane_state_free(ps, 0);
 
@@ -822,7 +929,14 @@ static void drm_output_assign_state(struct drm_output_state *state,s32 is_async)
 	struct drm_output *output = state->output;
 	struct drm_plane_state *plane_state;
 
-	ps_debug("output assign state %p", output);
+	ps_debug("output assign state %p is_async %d", output, is_async);
+#if 0
+	if (output->state_last) {
+		drm_output_state_free(output->state_last);
+		output->state_last = NULL;
+		sleep(10000);
+	}
+#endif
 	assert(!output->state_last);
 
 	if (is_async)
@@ -846,6 +960,8 @@ static void drm_output_assign_state(struct drm_output_state *state,s32 is_async)
 
 		if (plane->state_cur && !plane->state_cur->output_state)
 			drm_plane_state_free(plane->state_cur, 1);
+		ps_debug("plane %u's state_cur = %p", plane->index,
+			 plane_state);
 		plane->state_cur = plane_state;
 
 		if (!is_async) {
@@ -876,6 +992,7 @@ static s32 drm_output_apply_state_atomic(struct drm_output_state *state,
 	}
 
 	if (state->dpms == CLV_DPMS_ON) {
+		drm_debug("[MODSET] DPMS is set to [ON ] ..................\n");
 		ret = drm_mode_ensure_blob(b, current_mode);
 		if (ret != 0)
 			return ret;
@@ -891,6 +1008,7 @@ static s32 drm_output_apply_state_atomic(struct drm_output_state *state,
 					 output->head->prop_crtc_id,
 					 output->crtc_id);
 	} else {
+		drm_debug("[MODESET] DPMS is set to [OFF] .................\n");
 		drm_debug("[MODESET] Set output %u inactive", output->index);
 		drmModeAtomicAddProperty(req, output->crtc_id,
 					 output->prop_mode_id, 0);
@@ -904,8 +1022,9 @@ static s32 drm_output_apply_state_atomic(struct drm_output_state *state,
 		struct drm_plane *plane = plane_state->plane;
 
 		if (plane_state->fb) {
-			drm_debug("[MODESET] Set output %u's plane %u",
-				  output->index, plane->index);
+			drm_debug("[MODESET] Set output %u's plane %u fb_id %u",
+				  output->index, plane->index,
+				  plane_state->fb->fb_id);
 		} else {
 			drm_debug("[MODESET] Clr output %u's plane %u",
 				  output->index, plane->index);
@@ -914,37 +1033,82 @@ static s32 drm_output_apply_state_atomic(struct drm_output_state *state,
 					 plane->prop_fb_id,
 					 plane_state->fb ?
 					     plane_state->fb->fb_id : 0);
+//#ifdef DMABUF_DEBUG
+#if 0
+		if (plane->index == 2) {
+			plane_state->src_x = 0;
+			plane_state->src_y = 0;
+			plane_state->src_w = 1920 << 16;
+			plane_state->src_h = 1080 << 16;
+			plane_state->crtc_x = 128;
+			plane_state->crtc_y = 128;
+			plane_state->crtc_w = 1920;
+			plane_state->crtc_h = 1080;
+		}
+#endif
+		drm_debug("plane index %u fb_id %u", plane->index,
+			  plane_state->fb ? plane_state->fb->fb_id : 0);
 		drmModeAtomicAddProperty(req, plane->plane_id,
 					 plane->prop_crtc_id,
 					 plane_state->fb ?
 					     output->crtc_id : 0);
-		drmModeAtomicAddProperty(req, plane->plane_id,
-					 plane->prop_src_x,
-					 plane_state->src_x);
-		drmModeAtomicAddProperty(req, plane->plane_id,
+		drm_debug("plane index %u crtc index %u crtc_id %u",
+			  plane->index, output->index, plane_state->fb ?
+					     output->crtc_id : 0);
+			  
+		ret = drmModeAtomicAddProperty(req, plane->plane_id,
+					       plane->prop_src_x,
+					       plane_state->src_x);
+		drm_debug("SRC_X %d %d", plane_state->src_x, ret);
+		ret = drmModeAtomicAddProperty(req, plane->plane_id,
 					 plane->prop_src_y,
 					 plane_state->src_y);
-		drmModeAtomicAddProperty(req, plane->plane_id,
+		drm_debug("SRC_Y %d %d", plane_state->src_y, ret);
+		ret = drmModeAtomicAddProperty(req, plane->plane_id,
 					 plane->prop_src_w,
 					 plane_state->src_w);
-		drmModeAtomicAddProperty(req, plane->plane_id,
+		drm_debug("SRC_W %u %d", plane_state->src_w, ret);
+		ret = drmModeAtomicAddProperty(req, plane->plane_id,
 					 plane->prop_src_h,
 					 plane_state->src_h);
-		drmModeAtomicAddProperty(req, plane->plane_id,
+		drm_debug("SRC_H %u %d", plane_state->src_h, ret);
+		ret = drmModeAtomicAddProperty(req, plane->plane_id,
 					 plane->prop_crtc_x,
 					 plane_state->crtc_x);
-		drmModeAtomicAddProperty(req, plane->plane_id,
+		drm_debug("CRTC X %d %d", plane_state->crtc_x, ret);
+		ret = drmModeAtomicAddProperty(req, plane->plane_id,
 					 plane->prop_crtc_y,
 					 plane_state->crtc_y);
-		drmModeAtomicAddProperty(req, plane->plane_id,
+		drm_debug("CRTC Y %d %d", plane_state->crtc_y, ret);
+		ret = drmModeAtomicAddProperty(req, plane->plane_id,
 					 plane->prop_crtc_w,
 					 plane_state->crtc_w);
-		drmModeAtomicAddProperty(req, plane->plane_id,
+		drm_debug("CRTC W %u %d", plane_state->crtc_w, ret);
+		ret = drmModeAtomicAddProperty(req, plane->plane_id,
 					 plane->prop_crtc_h,
 					 plane_state->crtc_h);
+		drm_debug("CRTC H %u %d", plane_state->crtc_h, ret);
 	}
 
 	return 0;
+}
+
+static struct drm_output_state *drm_output_state_dup(
+				struct drm_output_state *src,
+				struct drm_pending_state *ps,
+				s32 reset_plane);
+
+static struct drm_output_state *drm_output_get_disable_state(
+				struct drm_pending_state *ps,
+				struct drm_output *output)
+{
+	struct drm_output_state *output_state;
+
+	output_state = drm_output_state_dup(output->state_cur,
+					    ps, 1);
+	output_state->dpms = CLV_DPMS_OFF;
+
+	return output_state;
 }
 
 static s32 drm_pending_state_apply_atomic(struct drm_pending_state *ps,
@@ -959,7 +1123,7 @@ static s32 drm_pending_state_apply_atomic(struct drm_pending_state *ps,
 	struct clv_head *head_base;
 	struct drm_head *head;
 	struct drm_output *output;
-	struct timespec now;
+	struct timespec now, t1, t2, t3, t4, t5;
 
 	if (!req)
 		return -1;
@@ -970,6 +1134,7 @@ static s32 drm_pending_state_apply_atomic(struct drm_pending_state *ps,
 		flags = 0;
 	}
 
+	clock_gettime(b->c->clk_id, &t1);
 	if (b->state_invalid) {
 		s32 err;
 
@@ -1018,10 +1183,13 @@ static s32 drm_pending_state_apply_atomic(struct drm_pending_state *ps,
 		flags |= DRM_MODE_ATOMIC_ALLOW_MODESET;
 	}
 
+	clock_gettime(b->c->clk_id, &t2);
+
 	list_for_each_entry(output_state, &ps->output_states, link) {
 		drm_debug("apply output %u atomic", output_state->output->index);
 		ret |= drm_output_apply_state_atomic(output_state, req, &flags);
 	}
+	clock_gettime(b->c->clk_id, &t3);
 
 	if (ret != 0) {
 		drm_err("atomic: couldn't compile atomic state");
@@ -1034,6 +1202,7 @@ static s32 drm_pending_state_apply_atomic(struct drm_pending_state *ps,
 		    now.tv_sec, now.tv_nsec / 1000000l);
 	ret = drmModeAtomicCommit(b->fd, req, flags, b);
 	drm_debug("[atomic] drmModeAtomicCommit");
+	clock_gettime(b->c->clk_id, &t4);
 
 	if (ret != 0) {
 		drm_err("atomic: couldn't commit new state: %s",
@@ -1052,11 +1221,22 @@ static s32 drm_pending_state_apply_atomic(struct drm_pending_state *ps,
 	b->state_invalid = 0;
 
 	assert(list_empty(&ps->output_states));
+	clock_gettime(b->c->clk_id, &t5);
+	timer_debug("drm flush spent %ld ms", timespec_sub_to_msec(&t2, &t1));
+	timer_debug("drm flush spent %ld ms", timespec_sub_to_msec(&t3, &t2));
+	timer_debug("drm flush spent %ld ms", timespec_sub_to_msec(&t4, &t3));
+	timer_debug("drm flush spent %ld ms", timespec_sub_to_msec(&t5, &t4));
+	timer_debug("is_async = %d, flags = %u", is_async, flags);
 
 out:
 	drmModeAtomicFree(req);
 	drm_pending_state_free(ps);
 	return ret;
+}
+
+static s32 drm_pending_state_apply_sync(struct drm_pending_state *ps)
+{
+	return drm_pending_state_apply_atomic(ps, 0);
 }
 
 static s32 drm_pending_state_apply(struct drm_pending_state *ps)
@@ -1358,8 +1538,10 @@ static void drm_output_start_repaint_loop(struct clv_output *base)
 
 	drm_debug("start repaint loop");
 	
-	if (output->disable_pending)
+	if (output->disable_pending) {
+		drm_debug("disable pending, return from repaint loop.");
 		return;
+	}
 
 	if (!output->primary_plane->state_cur->fb)
 		goto finish_frame;
@@ -1405,11 +1587,6 @@ static void drm_output_start_repaint_loop(struct clv_output *base)
 finish_frame:
 	clv_output_finish_frame(base, NULL);
 }
-
-static struct drm_output_state *drm_output_state_dup(
-				struct drm_output_state *src,
-				struct drm_pending_state *ps,
-				s32 reset_plane);
 
 static struct drm_plane_state *drm_output_state_get_plane(
 					struct drm_output_state *output_state,
@@ -1498,6 +1675,11 @@ static void drm_output_render(struct drm_output_state *state)
 	} else {
 		drm_debug("TAG");
 		fb = drm_output_render_gl(state);
+/*
+		if (output->base.changed) {
+			output->base.changed--;
+		}
+*/
 		output->base.primary_dirty = 0;
 	}
 
@@ -1528,8 +1710,11 @@ static s32 drm_output_repaint(struct clv_output *base, void *repaint_data)
 	struct drm_pending_state *ps = repaint_data;
 	struct drm_plane_state *primary_state;
 
-	if (output->disable_pending)
+	if (output->disable_pending) {
+		drm_debug("disable pending, return from output repaint.");
 		goto error;
+	}
+
 	drm_debug("output repaint");
 	assert(!output->state_last);
 	state = drm_pending_state_get_output(ps, output);
@@ -1553,6 +1738,225 @@ error:
 	return -1;
 }
 
+static struct drm_plane_state *drm_output_state_get_existing_plane(
+				struct drm_output_state *output_state,
+				struct drm_plane *plane);
+
+static void cursor_update(struct drm_backend *b, struct clv_view *v)
+{
+	struct drm_output *output;
+	struct gbm_bo *bo;
+	struct clv_buffer *buffer = v->cursor_buf;
+	struct shm_buffer *shm_buf = container_of(buffer, struct shm_buffer,
+						  base);
+
+	list_for_each_entry(output, &b->outputs, link) {
+		drm_warn("update output[%d]'s cursor", output->index);
+		output->cursor_index = 1 - output->cursor_index;
+		bo = output->cursor_fb[output->cursor_index]->bo;
+		if (gbm_bo_write(bo, shm_buf->shm.map,
+				buffer->stride * buffer->h) < 0)
+			gbm_err("write cursor bo failed. %s", strerror(errno));
+		clv_region_fini(&v->surface->damage);
+		clv_region_init(&v->surface->damage);
+	}
+}
+
+static struct drm_plane_state * drm_output_prepare_cursor_view(
+					struct drm_output_state *output_state,
+					struct clv_view *v)
+{
+	struct drm_plane_state *state = NULL;
+	struct drm_output *output = output_state->output;
+	struct clv_compositor *c = output->base.c;
+	struct drm_backend *b = to_drm_backend(c);
+	s32 calc, left, top, x, y, offs_x, offs_y, crtc_w, crtc_h;
+	s32 need_update = 0;
+	u32 width, height;
+
+	if (!v->cursor_buf)
+		return NULL;
+
+	if (clv_region_is_not_empty(&v->surface->damage))
+		need_update = 1;
+
+	if (need_update) {
+		cursor_update(output->b, v);
+
+		if (v->need_to_draw)
+			v->need_to_draw--;
+		v->painted = 1;
+	}
+
+	/*
+	 * cursor cannot be scaled.
+	 *     (the cursor layer's size is limited to b->cursor_width and
+	 *      b->cursor_height, scaling might cause cursur's size be out of
+	 *      range! )
+	 */
+
+	if ((v->area.pos.x + (s32)(v->surface->w))
+	       <= output->base.render_area.pos.x
+	    || (v->area.pos.y + (s32)(v->surface->h))
+	       <= output->base.render_area.pos.y
+	    || v->area.pos.x >= (s32)(output->base.render_area.pos.x
+	        + (s32)(output->base.render_area.w))
+	    || v->area.pos.y >= (s32)(output->base.render_area.pos.y
+	        + (s32)(output->base.render_area.h))) {
+		drm_debug("not in output's render area %d,%d",
+			  v->area.pos.x, v->area.pos.y);
+		state = drm_output_state_get_existing_plane(output_state,
+						output->cursor_plane);
+		if (state) {
+			state->fb = NULL;
+		}
+
+		return NULL;
+	}
+
+	ps_debug("prepare cursor view's state");
+	v->plane = &output->cursor_plane->base;
+
+	state = drm_output_state_get_plane(output_state, output->cursor_plane);
+	if (state && state->fb) {
+		assert(0);
+		return NULL;
+	}
+
+	state->output = output;
+
+	calc = output->base.current_mode->w * output->base.render_area.h
+		/ output->base.render_area.w;
+	if (calc <= output->base.current_mode->h) {
+		left = 0;
+		top = (output->base.current_mode->h - calc) / 2;
+		crtc_w = output->base.current_mode->w;
+		crtc_h = calc;
+	} else {
+		calc = output->base.render_area.w * output->base.current_mode->h
+			/ output->base.render_area.h;
+		left = (output->base.current_mode->w - calc) / 2;
+		top = 0;
+		crtc_w = calc;
+		crtc_h = output->base.current_mode->h;
+	}
+
+	offs_x = (v->area.pos.x - output->base.render_area.pos.x) * crtc_w
+			/ (s32)output->base.render_area.w;
+	offs_y = (v->area.pos.y - output->base.render_area.pos.y) * crtc_h
+			/ (s32)output->base.render_area.h;
+
+	if (offs_x <= (-(s32)(b->cursor_width)))
+		offs_x = (-(s32)(b->cursor_width)) + 1;
+
+	if (offs_y <= (-(s32)(b->cursor_height)))
+		offs_y = (-(s32)(b->cursor_height)) + 1;
+
+	x = left + offs_x;
+	y = top + offs_y;
+	width = (crtc_w - offs_x) > v->surface->w ? v->surface->w
+			: (crtc_w - offs_x);
+	height = (crtc_h - offs_y) > v->surface->h ? v->surface->h
+			: (crtc_h - offs_y);
+	drm_debug("============ (%d - %d) * %u / %u = %d ===========",
+		v->area.pos.x, output->base.render_area.pos.x,
+		crtc_w, output->base.render_area.w, offs_x);
+	drm_debug("============ (%d - %d) * %u / %u = %d ===========",
+		v->area.pos.y, output->base.render_area.pos.y,
+		crtc_h, output->base.render_area.h, offs_y);
+	drm_debug("width = %u height = %u", width, height);
+
+	state->v = v;
+	state->fb = drm_fb_ref(output->cursor_fb[output->cursor_index]);
+	//printf("Use Cursor bo %d, fb %u\n", output->cursor_index,
+	//	state->fb->fb_id);
+
+	state->src_x = 0;
+	state->src_y = 0;
+	state->src_w = width << 16;
+	state->src_h = height << 16;
+
+	state->crtc_x = x;
+	state->crtc_y = y;
+	state->crtc_w = width;
+	state->crtc_h = height;
+
+	drm_debug("output %d's cursor pos: %d,%d %ux%u", output->index,
+		  state->crtc_x, state->crtc_y, state->crtc_w, state->crtc_h);
+
+	return state;
+}
+
+static struct drm_plane_state * drm_output_prepare_overlay_view(
+					struct drm_output_state *output_state,
+					struct clv_view *v)
+{
+	struct drm_plane_state *state = NULL;
+	struct drm_plane *plane;
+	struct drm_output *output = output_state->output;
+	struct clv_compositor *c = output->base.c;
+	struct drm_backend *b = to_drm_backend(c);
+	s32 f = 0;
+	u32 width, height;
+	s32 calc, left, top;
+
+	ps_debug("prepare overylay view's state");
+	assert(v->curr_dmafb);
+	drm_fb_ref(v->curr_dmafb);
+	list_for_each_entry(plane, &output->planes, output_link) {
+		drm_debug("plane base %p %u v->plane %p", &plane->base,
+			  plane->index, v->plane);
+		if (&plane->base == v->plane) {
+			f = 1;
+			break;
+		}
+	}
+
+	if (!f) {
+		drm_err("cannot find drm_plane for clv_plane %p", v->plane);
+		return NULL;
+	}
+
+	state = drm_output_state_get_plane(output_state, plane);
+	if (state->fb) {
+		assert(0);
+		return NULL;
+	}
+	state->fb = v->curr_dmafb;
+
+	calc = output->base.current_mode->w * output->base.render_area.h
+		/ output->base.render_area.w;
+	if (calc <= output->base.current_mode->h) {
+		left = 0;
+		top = (output->base.current_mode->h - calc) / 2;
+		width = output->base.current_mode->w;
+		height = calc;
+	} else {
+		calc = output->base.render_area.w * output->base.current_mode->h
+			/ output->base.render_area.h;
+		left = (output->base.current_mode->w - calc) / 2;
+		top = 0;
+		width = calc;
+		height = output->base.current_mode->h;
+	}
+	drm_debug("Plane view port(%d,%d %ux%u)", left, top, width, height);
+	state->crtc_x = left;
+	state->crtc_y = top;
+	state->crtc_w = width;
+	state->crtc_h = height;
+	state->src_x = 0 << 16;
+	state->src_y = 0 << 16;
+	state->src_w = state->fb->w << 16;
+	state->src_h = state->fb->h << 16;
+
+	return state;
+}
+
+#ifdef DMABUF_DEBUG
+struct clv_view test_view;
+struct clv_buffer test_buf;
+#endif
+
 static void drm_output_assign_planes(struct clv_output *output_base,
 				     void *repaint_data)
 {
@@ -1560,13 +1964,50 @@ static void drm_output_assign_planes(struct clv_output *output_base,
 	struct clv_compositor *c = output_base->c;
 	struct clv_view *view;
 	struct drm_plane_state *plane_state = output->primary_plane->state_cur;
+	struct drm_output_state *state = NULL;
+	struct drm_pending_state *ps = repaint_data;
 
 	drm_debug("assign planes");
 	list_for_each_entry(view, &c->views, link) {
-		if (view->output_mask & (1 << output->index)) {
-			//view->plane = &output->primary_plane->base;
-			view->plane = &c->primary_plane;
+		if (view->type == CLV_VIEW_TYPE_PRIMARY) {
+			drm_debug("View %p is primary view", view);
+			if (view->output_mask & (1 << output->index)) {
+				view->plane = &c->primary_plane;
+			}
+		} else if (view->type == CLV_VIEW_TYPE_OVERLAY) {
+			if (!(view->output_mask & (1 << output->index)))
+				continue;
+			drm_debug("View %p is overlay view", view);
+			state = drm_pending_state_get_output(ps, output);
+			if (!state) {
+				state = drm_output_state_dup(output->state_cur,
+							     ps, 1);
+			}
+			drm_output_prepare_overlay_view(state, view);
+		} else if (view->type == CLV_VIEW_TYPE_CURSOR) {
+			if (!(view->output_mask & (1 << output->index)))
+				continue;
+			drm_debug("View %p is cursor view", view);
+			state = drm_pending_state_get_output(ps, output);
+			if (!state) {
+				state = drm_output_state_dup(output->state_cur,
+							     ps, 1);
+			}
+			drm_output_prepare_cursor_view(state, view);
+		} else {
+			drm_err("View %p's type is unknown.", view);
 		}
+	}
+}
+
+static void drm_output_cursor_bo_destroy(struct drm_output *output)
+{
+	u32 i;
+
+	drm_debug("destroy cursor fb");
+	for (i = 0; i < ARRAY_SIZE(output->cursor_fb); i++) {
+		drm_fb_unref(output->cursor_fb[i]);
+		output->cursor_fb[i] = NULL;
 	}
 }
 
@@ -1585,6 +2026,43 @@ static void drm_output_fini_egl(struct drm_output *output)
 		gbm_surface_destroy(output->gbm_surface);
 		output->gbm_surface = NULL;
 	}
+}
+
+static s32 drm_output_cursor_bo_create(struct drm_output *output,
+				       struct drm_backend *b)
+{
+	u32 i;
+	struct gbm_bo *bo;
+
+	drm_debug("create cursor fb");
+	if (!output->cursor_plane) {
+		drm_warn("no cursor plane");
+		return 0;
+	}
+
+	for (i = 0; i < ARRAY_SIZE(output->cursor_fb); i++) {
+		drm_debug("create cursor fb %ux%u", b->cursor_width,
+			  b->cursor_height);
+		bo = gbm_bo_create(b->gbm, b->cursor_width, b->cursor_height,
+				   GBM_FORMAT_ARGB8888,
+				   GBM_BO_USE_CURSOR | GBM_BO_USE_WRITE);
+		if (!bo)
+			goto err;
+
+		output->cursor_fb[i] =
+			drm_fb_get_from_bo(bo, b, 0, DRM_BUF_CURSOR);
+		if (!output->cursor_fb[i]) {
+			gbm_bo_destroy(bo);
+			goto err;
+		}
+	}
+
+	return 0;
+
+err:
+	drm_err("cursor buffers unavailable, using gl cursors\n");
+	drm_output_cursor_bo_destroy(output);
+	return -1;
 }
 
 static s32 drm_output_init_egl(struct drm_output *output)
@@ -1620,8 +2098,17 @@ static void drm_output_enable(struct clv_output *base,
 			      struct clv_rect *render_area)
 {
 	struct drm_output *output = to_drm_output(base);
+	struct drm_pending_state *ps;
 
 	drm_debug("Enabling CRTC %u...", output->crtc_id);
+	if (output->disable_pending) {
+		// TODO
+		drm_output_fini_egl(output);
+		ps = drm_pending_state_alloc(output->b);
+		drm_output_get_disable_state(ps, output);
+		drm_pending_state_apply_sync(ps);
+		output->disable_pending = 0;
+	}
 	output->base.changed = 1;
 	memcpy(&base->render_area, render_area, sizeof(struct clv_rect));
 	drm_debug("CRTC render_area: %d,%d %ux%u",
@@ -1635,16 +2122,22 @@ static void drm_output_enable(struct clv_output *base,
 static s32 drm_output_disable(struct clv_output *base)
 {
 	struct drm_output *output = to_drm_output(base);
+	struct drm_pending_state *ps;
 
-	if (!base->enabled)
+	if (!base->enabled && !output->disable_pending)
 		return 0;
 	drm_debug("Disabling CRTC %u...", output->crtc_id);
+	base->enabled = 0;
 	if (output->atomic_complete_pending) {
 		drm_debug("page flip not complete, disable pending.");
 		output->disable_pending = 1;
 		return -1;
 	}
 	drm_output_fini_egl(output);
+	//TODO
+	ps = drm_pending_state_alloc(output->b);
+	drm_output_get_disable_state(ps, output);
+	drm_pending_state_apply_sync(ps);
 	output->disable_pending = 0;
 	base->enabled = 0;
 	drm_debug("CRTC %u is disabled.", output->crtc_id);
@@ -1663,7 +2156,7 @@ static void clv_plane_init(struct clv_compositor *c, struct clv_plane *plane,
 	drm_debug("Plane stack debug:");
 	clv_printf("TOP < ");
 	list_for_each_entry(p, &c->planes, link) {
-		clv_printf("%s ", p->name);
+		clv_printf("%s %p ", p->name, p);
 	}
 	clv_printf("> Bottom\n");
 }
@@ -1815,6 +2308,35 @@ static struct drm_plane *drm_plane_create(struct clv_compositor *c, u32 index,
 	list_add_tail(&plane->link, &b->planes);
 
 	clv_plane_init(c, &plane->base, plane->index, output);
+
+#ifdef DMABUF_DEBUG
+	{
+
+		if (plane->index != 5)
+			return plane;
+
+//		s32 fd = create_dumb_nv24(c, 1920, 1200);
+		s32 fd = create_dumb_nv12(c, 1920, 1200);
+		test_buf.type = CLV_BUF_TYPE_DMA;
+		test_buf.w = 1920;
+		test_buf.h = 1080;
+		test_buf.stride = 1920;
+		//test_buf.size = 1920 * 1080 * 3;
+		test_buf.size = 1920 * 1080 * 3 / 2;
+		//test_buf.pixel_fmt = CLV_PIXEL_FMT_NV24;
+		test_buf.pixel_fmt = CLV_PIXEL_FMT_NV12;
+		test_buf.count_planes = 1;
+		test_buf.fd = fd;
+		INIT_LIST_HEAD(&test_buf.link);
+		memset(&test_view, 0, sizeof(test_view));
+		test_view.type = CLV_VIEW_TYPE_OVERLAY;
+		test_view.curr_dmafb = c->backend->import_dmabuf(c, &test_buf);
+		test_view.output_mask = 0x3;
+		test_view.plane = &plane->base;
+		list_add_tail(&test_view.link, &c->views);
+	}
+#endif
+
 	drm_debug("DRM plane created.");
 
 	return plane;
@@ -1984,6 +2506,8 @@ static void drm_output_destroy(struct clv_output *base)
 
 	output = to_drm_output(base);
 
+	drm_output_cursor_bo_destroy(output);
+
 	clv_output_fini(base);
 
 	output->primary_plane = NULL;
@@ -2143,10 +2667,16 @@ static struct drm_output_state *drm_output_state_dup(
 	ps_debug("src->pending_state = %p", src->pending_state);
 	if (ps) {
 		struct drm_output_state *o;
+		struct drm_plane_state *pls;
 
 		ps_debug("output in ps: %p", ps);
-		list_for_each_entry(o, &ps->output_states, link)
+		list_for_each_entry(o, &ps->output_states, link) {
 			ps_debug("\t%u", o->output->index);
+			ps_debug("\tplane in output: %p", o);
+			list_for_each_entry(pls, &o->plane_states, link) {
+				ps_debug("\t\t%u", pls->plane->index);
+			}
+		}
 	}
 	ps_debug("------ %p", dst);
 	return dst;
@@ -2233,6 +2763,8 @@ static struct clv_output *drm_output_create(struct clv_compositor *c,
 	list_add_tail(&output->link, &b->outputs);
 
 	clv_output_init(c, &output->base, output->index, &output->head->base);
+
+	drm_output_cursor_bo_create(output, b);
 	drm_debug("DRM output created.");
 
 	return &output->base;
@@ -2287,6 +2819,70 @@ static void drm_backend_destroy(struct clv_compositor *c)
 
 	c->backend = NULL;
 }
+
+#ifdef DMABUF_DEBUG
+s32 create_dumb_nv12(struct clv_compositor *c, u32 width, u32 height)
+{
+	struct drm_mode_create_dumb create_arg;
+	s32 ret, dmafd, newfd;
+	struct drm_backend *b = to_drm_backend(c);
+
+	memset(&create_arg, 0, sizeof create_arg);
+	create_arg.bpp = 8;
+	create_arg.width = (width + 16 - 1) & ~(16 - 1);
+	create_arg.height = ((height + 16 - 1) & ~(16 - 1)) * 3 / 2;
+	ret = drmIoctl(b->fd, DRM_IOCTL_MODE_CREATE_DUMB, &create_arg);
+	if (ret) {
+		drm_err("failed to create dumb");
+	} else {
+		drm_debug("create dumb ok");
+	}
+
+	ret = drmPrimeHandleToFD(b->fd, create_arg.handle, 0, &dmafd);
+	if (ret) {
+		drm_err("failed to get dma fd");
+	} else {
+		drm_debug("get dmafd");
+	}
+
+	drm_debug("dmafd %d", dmafd);
+	newfd = dup(dmafd);
+	close(dmafd);
+	drm_debug("dup dmafd %d", newfd);
+	return newfd;
+}
+
+s32 create_dumb_nv24(struct clv_compositor *c, u32 width, u32 height)
+{
+	struct drm_mode_create_dumb create_arg;
+	s32 ret, dmafd, newfd;
+	struct drm_backend *b = to_drm_backend(c);
+
+	memset(&create_arg, 0, sizeof create_arg);
+	create_arg.bpp = 8;
+	create_arg.width = (width + 16 - 1) & ~(16 - 1);
+	create_arg.height = ((height + 16 - 1) & ~(16 - 1)) * 3;
+	ret = drmIoctl(b->fd, DRM_IOCTL_MODE_CREATE_DUMB, &create_arg);
+	if (ret) {
+		drm_err("failed to create dumb");
+	} else {
+		drm_debug("create dumb ok");
+	}
+
+	ret = drmPrimeHandleToFD(b->fd, create_arg.handle, 0, &dmafd);
+	if (ret) {
+		drm_err("failed to get dma fd");
+	} else {
+		drm_debug("get dmafd");
+	}
+
+	drm_debug("dmafd %d", dmafd);
+	newfd = dup(dmafd);
+	close(dmafd);
+	drm_debug("dup dmafd %d", newfd);
+	return newfd;
+}
+#endif
 
 struct clv_backend *drm_backend_create(struct clv_compositor *c)
 {
@@ -2383,6 +2979,8 @@ struct clv_backend *drm_backend_create(struct clv_compositor *c)
 	b->base.repaint_flush = drm_repaint_flush;
 	b->base.repaint_cancel = drm_repaint_cancel;
 	b->base.output_create = drm_output_create;
+	b->base.dmabuf_destroy = drm_dmabuf_destroy;
+	b->base.import_dmabuf = drm_import_dmabuf;
 
 	renderer_create(c, (s32 *)&b->gbm_format, 1, 1, b->gbm, &vid);
 	set_renderer_dbg(0);
@@ -2390,10 +2988,10 @@ struct clv_backend *drm_backend_create(struct clv_compositor *c)
 	gl_renderer = c->renderer;
 	drm_debug("DRM Backend created.");
 
-	drm_dbg = 0;
+	drm_dbg = 5;
 	gbm_dbg = 0;
 	timer_dbg = 0;
-	ps_dbg = 0;
+	ps_dbg = 5;
 
 	return &b->base;
 
