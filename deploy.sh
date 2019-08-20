@@ -15,6 +15,6 @@ cp server/compositor/libclover_compositor.so $1/externals/lib/aarch64-linux/
 cp server/compositor/drm_backend/libclover_drm_backend.so $1/externals/lib/aarch64-linux/
 cp server/renderer/libclover_renderer.so $1/externals/lib/aarch64-linux/
 cp server/renderer/gl_renderer/libclover_gl_renderer.so $1/externals/lib/aarch64-linux/
-rm -f $1/externals/etc/aarch64-linux/clover_config.xml
-cp clover_extended.xml $1/externals/etc/aarch64-linux/clover_config.xml
+rm -f $1/externals/etc/aarch64-linux/clover_extended.xml
+cp clover_extended.xml $1/externals/etc/aarch64-linux/clover_extended.xml
 

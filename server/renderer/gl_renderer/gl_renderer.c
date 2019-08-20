@@ -4,6 +4,7 @@
 #include <assert.h>
 #include <unistd.h>
 #include <errno.h>
+#include <time.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
@@ -683,9 +684,9 @@ static s32 gl_setup(struct clv_compositor *c, EGLSurface egl_surface)
 
 static void gl_surface_state_destroy(struct gl_surface_state *gs)
 {
-	struct clv_buffer *buffer;
+	/* struct clv_buffer *buffer;
 	struct dma_buffer *dmabuf;
-	struct gl_display *disp;
+	struct gl_display *disp; */
 
 	if (gs) {
 		if (gs->surface)
@@ -793,9 +794,9 @@ static void gl_attach_dma_buffer(struct clv_surface *surface,
 	struct gl_surface_state *gs = get_surface_state(surface);
 	struct dma_buffer *dmabuf = container_of(buffer, struct dma_buffer,
 						 base);
-	struct timespec t1, t2;
+	//struct timespec t1, t2;
 
-	clock_gettime(c->clk_id, &t1);
+	//clock_gettime(c->clk_id, &t1);
 	assert(dmabuf);
 	if (buffer->pixel_fmt == CLV_PIXEL_FMT_XRGB8888) {
 		gs->target = GL_TEXTURE_2D;
@@ -825,7 +826,8 @@ static void gl_attach_dma_buffer(struct clv_surface *surface,
 	gs->buf_type = CLV_BUF_TYPE_DMA;
 	gs->y_inverted = 1;
 	gs->surface = surface;
-	clock_gettime(c->clk_id, &t2);
+	//clock_gettime(c->clk_id, &t2);
+	//printf("attach dma buffer spent %lu\n", timespec_sub_to_msec(&t2, &t1));
 }
 
 static void gl_attach_shm_buffer(struct clv_surface *surface,
@@ -1456,16 +1458,21 @@ static void repaint_views(struct clv_output *output, struct clv_region *damage)
 {
 	struct clv_compositor *c = output->c;
 	struct clv_view *view;
+	//struct timespec t1, t2;
 
+	//clock_gettime(c->clk_id, &t1);
 	list_for_each_entry_reverse(view, &c->views, link) {
 		gles_debug("view plane %p, primary_plane %p",
 			   view->plane, &output->c->primary_plane);
 		//if (view->type == CLV_VIEW_TYPE_PRIMARY) {
-		if (view->plane == &output->c->primary_plane) {
+		if (view->plane == &output->c->primary_plane
+		    && view->output_mask & (1 << output->index)) {
 			draw_view(view, output, damage);
 			view->need_to_draw = 0;
 		}
 	}
+	//clock_gettime(c->clk_id, &t2);
+	//printf("repaint views spent %lu\n", timespec_sub_to_msec(&t2, &t1));
 }
 
 static void gl_repaint_output(struct clv_output *output)
@@ -1479,6 +1486,7 @@ static void gl_repaint_output(struct clv_output *output)
 	static s32 errored = 0;
 	s32 left, top, calc;
 	u32 width, height;
+	//struct timespec t1, t2;
 
 	calc = output->current_mode->w * output->render_area.h
 		/ output->render_area.w;
@@ -1525,7 +1533,10 @@ static void gl_repaint_output(struct clv_output *output)
 	clv_region_fini(&total_damage);
 	/* TODO send frame signal */
 	egl_debug("EGL Swap buffer.");
+	//clock_gettime(c->clk_id, &t1);
 	ret = eglSwapBuffers(disp->egl_display, go->egl_surface);
+	//clock_gettime(c->clk_id, &t2);
+	//printf("Swap spent %ld ms\n", timespec_sub_to_msec(&t2, &t1));
 	if (ret == EGL_FALSE && !errored) {
 		errored = 1;
 		egl_err("Failed to call eglSwapBuffers.");
@@ -1588,6 +1599,7 @@ static void gl_flush_damage(struct clv_surface *surface)
 				   buffer->h / gs->vsub[j],
 				   0,
 				   data, gs->offset[j]);
+
 			glTexImage2D(GL_TEXTURE_2D, 0,
 				     gs->gl_format[j],
 				     gs->pitch / gs->hsub[j],
@@ -1627,6 +1639,7 @@ static void gl_flush_damage(struct clv_surface *surface)
 				   (box->p2.x - box->p1.x) / gs->hsub[j],
 				   (box->p2.y - box->p1.y) / gs->vsub[j],
 				   data, gs->offset[j]);
+
 			glTexSubImage2D(GL_TEXTURE_2D, 0,
 					box->p1.x / gs->hsub[j],
 					box->p1.y / gs->vsub[j],

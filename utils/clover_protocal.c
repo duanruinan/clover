@@ -1184,3 +1184,77 @@ void clv_cmd_dump(u8 *data)
 	}
 }
 
+u8 *clv_server_create_hpd_cmd(u64 hpd_info, u32 *n)
+{
+	struct clv_tlv *tlv, *tlv_map, *tlv_hpd;
+	u32 size, size_hpd, size_map, *map, *head;
+	u8 *p;
+
+	size_map = CLV_CMD_MAP_SIZE;
+	size_hpd = sizeof(*tlv) + sizeof(u64);
+	size = sizeof(*tlv) + size_map + size_hpd + sizeof(u32);
+	p = calloc(1, size);
+	if (!p)
+		return NULL;
+
+	head = (u32 *)p;
+	*head = 1 << CLV_CMD_HPD_SHIFT;
+
+	tlv = (struct clv_tlv *)(p+sizeof(u32));
+	tlv->tag = CLV_TAG_WIN;
+	tlv->length = size_hpd + size_map;
+	tlv_map = (struct clv_tlv *)(&tlv->payload[0]);
+	tlv_hpd = (struct clv_tlv *)(&tlv->payload[0] + size_map);
+	tlv_map->tag = CLV_TAG_MAP;
+	tlv_map->length = CLV_CMD_MAP_SIZE - sizeof(struct clv_tlv);
+	map = (u32 *)(&tlv_map->payload[0]);
+	map[CLV_CMD_HPD_SHIFT - CLV_CMD_OFFSET] = (u8 *)tlv_hpd - p;
+	tlv_hpd->tag = CLV_TAG_RESULT;
+	tlv_hpd->length = sizeof(u64);
+	*((u64 *)(&tlv_hpd->payload[0])) = hpd_info;
+	*n = size;
+
+	return p;
+}
+
+u8 *clv_dup_hpd_cmd(u8 *dst, u8 *src, u32 n, u64 hpd_info)
+{
+	struct clv_tlv *tlv, *tlv_map, *tlv_hpd;
+	u32 *map;
+
+	memcpy(dst, src, n);
+
+	tlv = (struct clv_tlv *)(dst+sizeof(u32));
+	tlv_map = (struct clv_tlv *)(&tlv->payload[0]);
+	map = (u32 *)(&tlv_map->payload[0]);
+	tlv_hpd = (struct clv_tlv *)(dst
+			+ map[CLV_CMD_HPD_SHIFT-CLV_CMD_OFFSET]);
+	*((u32 *)(&tlv_hpd->payload[0])) = hpd_info;
+	return dst;
+}
+
+u64 clv_client_parse_hpd_cmd(u8 *data)
+{
+	struct clv_tlv *tlv, *tlv_map, *tlv_result;
+	u32 size, *head, *map;
+
+	head = (u32 *)data;
+	if (!((*head) & (1 << CLV_CMD_HPD_SHIFT)))
+		return 0;
+
+	tlv = (struct clv_tlv *)(data+sizeof(u32));
+	assert(tlv->tag == CLV_TAG_WIN);
+	size = sizeof(*tlv) + sizeof(u32) + tlv->length;
+	tlv_map = (struct clv_tlv *)(&tlv->payload[0]);
+	map = (u32 *)(&tlv_map->payload[0]);
+	if (map[CLV_CMD_HPD_SHIFT - CLV_CMD_OFFSET] >= size)
+		return 0;
+	tlv_result = (struct clv_tlv *)(data
+			+ map[CLV_CMD_HPD_SHIFT-CLV_CMD_OFFSET]);
+	if (tlv_result->tag != CLV_TAG_RESULT)
+		return 0;
+	if (tlv_result->length != sizeof(u64))
+		return 0;
+	return *((u64 *)(&tlv_result->payload[0]));
+}
+

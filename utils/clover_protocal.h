@@ -80,6 +80,7 @@ enum clv_cmd_shift {
 
 	/* <---------------- Clover setting utils ---------------> */
 	CLV_CMD_SHELL_SHIFT,
+	CLV_CMD_HPD_SHIFT,
 	CLV_CMD_LAST_SHIFT,
 };
 
@@ -189,6 +190,7 @@ struct clv_commit_info {
 	s32 shown; /* 0: hide / 1: show */
 
 	s32 view_x, view_y;
+	s32 view_hot_x, view_hot_y;
 	u32 view_width, view_height;
 
 	/* 0: z order no change / 1: bring to top / -1: falling down */
@@ -234,8 +236,10 @@ struct clv_input_event {
 		struct {
 			u16 x;
 			u16 y;
+/*
 			s16 dx;
 			s16 dy;
+*/
 		} pos;
 	} v;
 };
@@ -288,6 +292,59 @@ u8 *clv_client_destroy_bo_cmd(u64 bo_id, u32 *n);
 u8 *clv_dup_destroy_bo_cmd(u8 *dst, u8 *src, u32 n, u64 bo_id);
 u64 clv_server_parse_destroy_bo_cmd(u8 *data);
 void clv_cmd_dump(u8 *data);
+
+#define set_hpd_info(pinfo, index, on) do { \
+	*(pinfo) |= (1 << (index)); \
+	if ((on)) { \
+		*(pinfo) |= (1 << ((index) + 8)); \
+	} else { \
+		*(pinfo) &= ~(1 << ((index) + 8)); \
+	} \
+} while (0);
+
+#define parse_hpd_info(info, index, pavail, pon) do { \
+	if (!((info) & (1 << (index)))) { \
+		*(pavail) = 0; \
+	} else { \
+		*(pavail) = 1; \
+		if ((info) & (1 << ((index) + 8))) { \
+			*(pon) = 1; \
+		} else { \
+			*(pon) = 0; \
+		} \
+	} \
+} while (0);
+
+u8 *clv_server_create_hpd_cmd(u64 hpd_info, u32 *n);
+u8 *clv_dup_hpd_cmd(u8 *dst, u8 *src, u32 n, u64 hpd_info);
+u64 clv_client_parse_hpd_cmd(u8 *data);
+
+/*
+ * Input command to communicate with input server
+ * 
+ */
+enum input_cmd_type {
+	INPUT_CMD_TYPE_UNKNOWN = 0,
+	INPUT_CMD_TYPE_SET_CURSOR,
+	INPUT_CMD_TYPE_SET_CURSOR_RANGE,
+};
+
+#define MAX_DESKTOP_NR 8
+struct input_cmd {
+	enum input_cmd_type type;
+	union {
+		struct {
+			u32 data[64*64];
+			s32 hot_x, hot_y;
+			u32 w, h;
+		} cursor;
+		struct {
+			struct clv_rect global_area[MAX_DESKTOP_NR];
+			s32 count_rects;
+			s32 map[MAX_DESKTOP_NR];
+		} range;
+	} c;
+};
 
 #endif
 

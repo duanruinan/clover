@@ -115,6 +115,10 @@ struct clv_client_agent {
 	u8 *bo_complete_tx_cmd;
 	u32 bo_complete_tx_len;
 
+	u8 *hpd_tx_cmd_t;
+	u8 *hpd_tx_cmd;
+	u32 hpd_tx_len;
+
 	u8 *destroy_ack_tx_cmd_t;
 	u8 *destroy_ack_tx_cmd;
 	u32 destroy_ack_tx_len;
@@ -163,6 +167,9 @@ struct clv_view {
 	u32 output_mask;
 	s32 painted;
 	s32 need_to_draw;
+#if 1
+	s32 hot_x, hot_y;
+#endif
 };
 
 struct clv_buffer {
@@ -173,6 +180,7 @@ struct clv_buffer {
 	s32 count_planes;
 	char name[CLV_BUFFER_NAME_LEN];
 	s32 fd;
+	void *internal_fb;
 	struct list_head link; /* link to client agent */
 };
 
@@ -257,7 +265,7 @@ struct clv_backend {
 					     struct clv_head_config *head_cfg);
 	void * (*import_dmabuf)(struct clv_compositor *c,
 				struct clv_buffer *buffer);
-	void (*dmabuf_destroy)(void *buffer);
+	void (*dmabuf_destroy)(struct clv_output *output, void *buffer);
 };
 
 void set_scanout_dbg(u32 flag);

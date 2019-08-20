@@ -14,11 +14,13 @@
 	-->
 	<head index="0" max_width="4096" max_height="2160">
 		<encoder index="0" />
-		<output index="0" max_width="4096" max_height="2160" count_layers="4" def_rect="0,0/1920x1200">
+		<output index="0" max_width="4096" max_height="2160" count_layers="3" def_rect="0,0/1920x1200">
+			<!--
 			<hw_layer index="3" type="overlay" count_formats="2">
 				<format>XRGB8888</format>
 				<format>ARGB8888</format>
 			</hw_layer>
+			-->
 			<hw_layer index="2" type="overlay" count_formats="3">
 				<format>XRGB8888</format>
 				<format>ARGB8888</format>

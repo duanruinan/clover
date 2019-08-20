@@ -215,17 +215,16 @@ s32 clv_socket_accept(const s32 sock)
 s32 clv_socket_connect(const s32 sock, const char *remote)
 {
 	struct sockaddr_un servaddr;
-	u32 cnt = 0;
 	s32 i;
 
 	memset(&servaddr, 0, sizeof(servaddr));
 	servaddr.sun_family = AF_LOCAL;
 	strcpy(servaddr.sun_path, remote);
-	for (i = 0; i < 60; i++) {
+	for (i = 0; i < 500; i++) {
 		if (connect(sock, (struct sockaddr*)&servaddr,
 			    sizeof(servaddr)) < 0) {
 			clv_warn("cannot connect to %s %m try:(%d)", remote, i);
-			usleep(15000 * cnt);
+			usleep(30000);
 			continue;
 		}
 		return 0;

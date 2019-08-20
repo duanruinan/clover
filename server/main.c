@@ -158,6 +158,8 @@ static void head_state_changed_cb(struct clv_listener *listener, void *data)
 	struct clv_output *output;
 	struct clv_head *head;
 	s32 i;
+	struct clv_client_agent *agent;
+	u64 hpd_info = 0;
 
 	for (i = 0; i < server.config->count_heads; i++) {
 		if (!server.outputs[i]) {
@@ -179,12 +181,20 @@ static void head_state_changed_cb(struct clv_listener *listener, void *data)
 						   &server.config->heads[i]);
 			output->enable(output,
 			  &server.config->heads[i].encoder.output.render_area);
-			printf("Head change schedule repaint\n");
+			//printf("Head change schedule repaint\n");
 			clv_output_schedule_repaint_reset(output);
 			clv_output_schedule_repaint(output, 2);
+			set_hpd_info(&hpd_info, i, 1);
 		} else {
 			output->disable(output);
+			set_hpd_info(&hpd_info, i, 0);
 		}
+	}
+
+	list_for_each_entry(agent, &server.client_agents, link) {
+		clv_dup_hpd_cmd(agent->hpd_tx_cmd, agent->hpd_tx_cmd_t,
+				agent->hpd_tx_len, hpd_info);
+		clv_send(agent->sock, agent->hpd_tx_cmd, agent->hpd_tx_len);
 	}
 }
 
@@ -196,6 +206,7 @@ static void update_layout(struct clv_compositor *c, struct clv_shell_info *si)
 	struct clv_output_config *output_cfg;
 	struct clv_rect *rc;
 
+	com_debug("update screen layout");
 	config = server.config;
 	if (si->value.layout.mode != config->mode) {
 		com_info("Layout mode chanaged. %s -> %s",
@@ -220,14 +231,23 @@ static void update_layout(struct clv_compositor *c, struct clv_shell_info *si)
 		}
 	}
 
+	com_debug("config->count_heads = %d", config->count_heads);
 	for (i = 0; i < config->count_heads; i++) {
+		com_debug("output: %p", output);
 		output = server.outputs[i];
 		if (!output)
 			continue;
+		com_debug("rc->w %u rc->h %u", rc->w, rc->h);
+		rc = &si->value.layout.desktops[i];
 		if (!rc->w && !rc->h)
 			continue;
 		output_cfg = &config->heads[i].encoder.output;
-		rc = &si->value.layout.desktops[i];
+		com_debug("rc: %d,%d %ux%u render_area: %d,%d %ux%u",
+			rc->pos.x, rc->pos.y, rc->w, rc->h,
+			output_cfg->render_area.pos.x,
+			output_cfg->render_area.pos.y,
+			output_cfg->render_area.w,
+			output_cfg->render_area.h);
 		if (rc->w != output_cfg->render_area.w ||
 		    rc->h != output_cfg->render_area.h ||
 		    rc->pos.x != output_cfg->render_area.pos.x ||
@@ -411,14 +431,35 @@ static s32 client_sock_cb(s32 fd, u32 mask, void *data)
 				com_debug("receive dma buf fd %d", dmabuf_fd);
 				if (dmabuf_fd < 0) {
 					com_err("dmabuf illegal %d", dmabuf_fd);
-					getchar();
 					client_agent_destroy(agent);
 					return -1;
 				}
-				buf = agent->c->renderer->import_dmabuf(
-					agent->c, dmabuf_fd,
-					bi.width, bi.height, bi.stride, bi.fmt,
-					bi.internal_fmt);
+				if (agent->view->type == CLV_VIEW_TYPE_OVERLAY){
+					buf = calloc(1, sizeof(*buf));
+					buf->type = CLV_BUF_TYPE_DMA;
+					buf->w = bi.width;
+					buf->h = bi.height;
+					buf->fd = dmabuf_fd;
+					buf->stride = bi.stride;
+					buf->internal_fb = NULL;
+					if (bi.fmt == CLV_PIXEL_FMT_NV12) {
+						buf->size = bi.stride*bi.height
+								* 3 / 2;
+						buf->pixel_fmt
+							= CLV_PIXEL_FMT_NV12;
+					} else if (bi.fmt==CLV_PIXEL_FMT_NV24) {
+						buf->size = bi.stride*bi.height
+								* 3;
+						buf->pixel_fmt
+							= CLV_PIXEL_FMT_NV24;
+					}
+				} else {
+					buf = agent->c->renderer->import_dmabuf(
+						agent->c, dmabuf_fd,
+						bi.width, bi.height,
+						bi.stride, bi.fmt,
+						bi.internal_fmt);
+				}
 				assert(buf);
 				list_add_tail(&buf->link, &agent->buffers);
 				id = (u64)buf;
@@ -447,7 +488,16 @@ static s32 client_sock_cb(s32 fd, u32 mask, void *data)
 			id = 0;
 		} else {
 			buf = (struct clv_buffer *)(ci.bo_id);
-			com_debug("parse commit command ok.");
+			com_debug("parse commit command ok. bo_id = %lu",
+				  ci.bo_id);
+			assert(ci.bo_id);
+			agent->view->area.pos.x = ci.view_x;
+			agent->view->area.pos.y = ci.view_y;
+			com_debug("set view %p pos: %d, %d", agent->view,
+				  agent->view->area.pos.x,
+				  agent->view->area.pos.y);
+			agent->view->hot_x = ci.view_hot_x;
+			agent->view->hot_y = ci.view_hot_y;
 			if (buf->type == CLV_BUF_TYPE_SHM) {
 				com_debug("Commit info: 0x%08lX, %d, %d,"
 					  "%d:%ux%u %d damage:%d,%d %ux%u",
@@ -458,9 +508,9 @@ static s32 client_sock_cb(s32 fd, u32 mask, void *data)
 					  ci.bo_damage.pos.x,ci.bo_damage.pos.y,
 					  ci.bo_damage.w, ci.bo_damage.h);
 				if (agent->view->type == CLV_VIEW_TYPE_CURSOR) {
+					com_debug("receive cursor bo %lu's cmt",
+						  ci.bo_id);
 					agent->view->cursor_buf = buf;
-					agent->view->area.pos.x = ci.view_x;
-					agent->view->area.pos.y = ci.view_y;
 				}
 				clv_region_fini(&agent->surface->damage);
 				if (ci.bo_damage.w && ci.bo_damage.h)
@@ -499,8 +549,20 @@ static s32 client_sock_cb(s32 fd, u32 mask, void *data)
 					  ci.view_width, ci.view_height,
 					  ci.delta_z);
 
-				agent->c->renderer->attach_buffer(
-					agent->surface, buf);
+				if (agent->view->type == CLV_VIEW_TYPE_PRIMARY){
+					agent->c->renderer->attach_buffer(
+						agent->surface, buf);
+				} else {
+					com_debug("attach dma buf %p", buf);
+					agent->view->last_dmafb = 
+						agent->view->curr_dmafb;
+					agent->view->curr_dmafb = 
+					    agent->c->backend->import_dmabuf(
+					        agent->c, buf);
+					com_debug("view %p's curr_dmafb = %p",
+					    agent->view,
+					    agent->view->curr_dmafb);
+				}
 			}
 
 			agent->view->plane = &agent->c->primary_plane;
@@ -606,12 +668,23 @@ static s32 client_sock_cb(s32 fd, u32 mask, void *data)
 				if (shell_tx_buf)
 					clv_send(fd, shell_tx_buf, n);
 			} else if (shell.cmd==CLV_SHELL_CANVAS_LAYOUT_SETTING) {
+				struct clv_client_agent *agt;
 				com_debug("receive layout setting command.");
-				// TODO enable /disable
 				update_layout(agent->c, &shell);
+
 				shell_tx_buf = clv_create_shell_cmd(&shell, &n);
-				if (shell_tx_buf)
-					clv_send(fd, shell_tx_buf, n);
+				/*
+				 * send layout change event to each agent.
+				 * if (shell_tx_buf)
+				 * 	clv_send(fd, shell_tx_buf, n);
+				 */
+				list_for_each_entry(agt, &server.client_agents,
+							link) {
+					if (shell_tx_buf) {
+						clv_send(agt->sock,
+							shell_tx_buf, n);
+					}
+				}
 			}
 		}
 	} else {

@@ -1098,7 +1098,7 @@ static void shmbuf_redraw(void *data)
 	render_cpu(window, buffer);
 
 	window->c.bo_id = buffer->id;
-#if 1
+#if 0
 	window->c.bo_damage.pos.x = buffer->w / 3;
 	window->c.bo_damage.pos.y = buffer->h / 3;
 	window->c.bo_damage.w = buffer->w / 3;
@@ -1324,6 +1324,19 @@ static s32 dmabuf_client_event_cb(s32 fd, u32 mask, void *data)
 			clv_debug("receive shell event");
 		} else if (flag & (1 << CLV_CMD_DESTROY_ACK_SHIFT)) {
 			clv_debug("receive destroy ack");
+		} else if (flag & (1 << CLV_CMD_HPD_SHIFT)) {
+			s32 avail = 0;
+			s32 on = 0;
+			u64 hpd_info;
+
+			clv_debug("receive hpd cmd");
+			hpd_info = clv_client_parse_hpd_cmd(window->ipc_rx_buf);
+			parse_hpd_info(hpd_info, 0, &avail, &on);
+			if (avail)
+				clv_debug("[HPD] 0: %d", on);
+			parse_hpd_info(hpd_info, 1, &avail, &on);
+			if (avail)
+				clv_debug("[HPD] 1: %d", on);
 		} else {
 			clv_err("unknown command 0x%08X", flag);
 			return -1;
@@ -1496,6 +1509,19 @@ static s32 shm_client_event_cb(s32 fd, u32 mask, void *data)
 			clv_debug("receive shell event");
 		} else if (flag & (1 << CLV_CMD_DESTROY_ACK_SHIFT)) {
 			clv_debug("receive destroy ack");
+		} else if (flag & (1 << CLV_CMD_HPD_SHIFT)) {
+			s32 avail = 0;
+			s32 on = 0;
+			u64 hpd_info;
+
+			clv_debug("receive hpd cmd");
+			hpd_info = clv_client_parse_hpd_cmd(window->ipc_rx_buf);
+			parse_hpd_info(hpd_info, 0, &avail, &on);
+			if (avail)
+				clv_debug("[HPD] 0: %d", on);
+			parse_hpd_info(hpd_info, 1, &avail, &on);
+			if (avail)
+				clv_debug("[HPD] 1: %d", on);
 		} else {
 			clv_err("unknown command 0x%08X", flag);
 			return -1;
