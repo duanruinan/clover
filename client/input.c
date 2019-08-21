@@ -505,10 +505,8 @@ static void send_mouse_pos_manually(struct input_display *disp)
 	event.code = ABS_X | ABS_Y;
 	event.v.pos.x = disp->abs_x;
 	event.v.pos.y = disp->abs_x;
-/*
 	event.v.pos.dx = 0;
 	event.v.pos.dy = 0;
-*/
 
 	list_for_each_entry(client, &disp->clients, link) {
 		clv_send(client->sock, &len, sizeof(u32));
@@ -592,10 +590,8 @@ static void event_proc(struct input_display *disp, struct input_event *evts,
 				disp->tx_buf[dst].code = ABS_X | ABS_Y;
 				disp->tx_buf[dst].v.pos.x = disp->abs_x;
 				disp->tx_buf[dst].v.pos.y = disp->abs_y;
-/*
 				disp->tx_buf[dst].v.pos.dx = (s16)dx;
 				disp->tx_buf[dst].v.pos.dy = (s16)dy;
-*/
 				dst++;
 			}
 			break;

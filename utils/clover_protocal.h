@@ -236,10 +236,8 @@ struct clv_input_event {
 		struct {
 			u16 x;
 			u16 y;
-/*
 			s16 dx;
 			s16 dy;
-*/
 		} pos;
 	} v;
 };
