@@ -160,6 +160,7 @@ static void head_state_changed_cb(struct clv_listener *listener, void *data)
 	s32 i;
 	struct clv_client_agent *agent;
 	u64 hpd_info = 0;
+	char head_status[64];
 
 	for (i = 0; i < server.config->count_heads; i++) {
 		if (!server.outputs[i]) {
@@ -184,9 +185,17 @@ static void head_state_changed_cb(struct clv_listener *listener, void *data)
 			//printf("Head change schedule repaint\n");
 			clv_output_schedule_repaint_reset(output);
 			clv_output_schedule_repaint(output, 2);
+			sprintf(head_status, "echo \"%ux%u\" > /tmp/head-%u",
+				output->current_mode->w,
+				output->current_mode->h,
+				head->index);
+			system(head_status);
 			set_hpd_info(&hpd_info, i, 1);
 		} else {
 			output->disable(output);
+			sprintf(head_status, "echo \"0x0\" > /tmp/head-%u",
+				head->index);
+			system(head_status);
 			set_hpd_info(&hpd_info, i, 0);
 		}
 	}
