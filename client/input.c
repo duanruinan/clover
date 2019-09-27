@@ -660,7 +660,7 @@ static s32 read_input_event(s32 fd, u32 mask, void *data)
 
 static void add_input_device(struct input_display *disp, const char *devpath)
 {
-	struct input_device *dev, *dev_present, *next;
+	struct input_device *dev;
 	enum input_type type;
 	s32 fd;
 	char cmd[64];
@@ -668,22 +668,8 @@ static void add_input_device(struct input_display *disp, const char *devpath)
 	type = test_dev(devpath);
 	if (type == INPUT_TYPE_UNKNOWN)
 		return;
-
-	list_for_each_entry_safe(dev_present, next, &disp->devs, link) {
-		if (type == dev_present->type) {
-			clv_debug("already has %s (%s), curr (%s)",
-				type == INPUT_TYPE_KBD?"K":"M",
-				dev_present->name,
-				devpath);
-			if (type == INPUT_TYPE_MOUSE) {
-				if (has_kbd) {
-					remove_input_device(disp,
-							dev_present->name);
-				} else {
-					return;
-				}
-			}
-		}
+	if (type == INPUT_TYPE_KBD && has_kbd) {
+			return;
 	}
 
 	fd = open(devpath, O_RDWR | O_CLOEXEC, 0644);
