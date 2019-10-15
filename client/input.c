@@ -1031,7 +1031,7 @@ static s32 clv_event_proc(s32 fd, u32 mask, void *data)
 	return 0;
 }
 
-#if 0
+#if 1
 static void create_shmbuf(struct input_display *disp, u32 index, u32 w, u32 h)
 {
 	char name[32];
