@@ -774,8 +774,8 @@ static struct dmabuf_window *create_dmabuf_window(struct client_display *disp,
 	win->v.area.h = win->h;
 	win->v.alpha = 1.0f;
 	win->v.primary_output = output_index;
-	//win->v.output_mask = 0x03;
-	win->v.output_mask = 1 << output_index;
+	win->v.output_mask = 0x03;
+	//win->v.output_mask = 1 << output_index;
 	win->b.type = CLV_BUF_TYPE_DMA;
 	win->b.fmt = CLV_PIXEL_FMT_ARGB8888;
 	win->b.internal_fmt = DRM_FORMAT_ARGB8888;
