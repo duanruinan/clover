@@ -296,10 +296,13 @@ static void clv_compositor_init_background(struct clv_compositor *c)
 
 static s32 output_repaint_timer_handler(void *data);
 
+static s32 clover_delay = -11;
+
 struct clv_compositor *clv_compositor_create(struct clv_display *display)
 {
 	struct clv_compositor *c = calloc(1, sizeof(*c));
 	struct clv_event_loop *loop = clv_display_get_event_loop(display);
+	char *delay_value;
 
 	if (!c)
 		return NULL;
@@ -329,6 +332,11 @@ struct clv_compositor *clv_compositor_create(struct clv_display *display)
 
 	clv_compositor_init_background(c);
 	//clv_compositor_init_dummy_cursor(c);
+
+	delay_value = getenv("CLOVER_DELAY");
+	if (delay_value)
+		clover_delay = atoi(delay_value);
+	clv_debug("CLOVER_DELAY: %d", clover_delay);
 
 	return c;
 
@@ -533,15 +541,21 @@ void clv_output_finish_frame(struct clv_output *output, struct timespec *stamp)
 	}
 	refresh_nsec = millihz_to_nsec(output->current_mode->refresh);
 	cmp_debug("************emit bo complete");
-	if (list_empty(&output->flip_signal.listener_list))
-		cmp_debug("empty!!!!!!!!!!!");
+//	clv_debug("emit bo complete");
 	cmp_debug("output %p %u", output, output->index);
-	clv_signal_emit(&output->flip_signal, output);
+//	clv_debug("----- emit flip event %p, %d", &output->flip_signal, output->index);
+	if (list_empty(&output->flip_signal.listener_list)) {
+		cmp_debug("empty!!!!!!!!!!!");
+	} else {
+		clv_signal_emit(&output->flip_signal, output);
+	}
+//	clv_debug("----- emit flip event over");
 	timer_debug("[OUTPUT: %u] repaint finished! refresh: %u",
 		    output->index, refresh_nsec / 1000000);
 	timespec_add_nsec(&output->next_repaint, stamp, refresh_nsec);
 	//TODO
-	timespec_add_msec(&output->next_repaint, &output->next_repaint, -7);
+	timespec_add_msec(&output->next_repaint, &output->next_repaint,
+			clover_delay);
 	msec_rel = timespec_sub_to_msec(&output->next_repaint, &now);
 	if (msec_rel < -1000 || msec_rel > 1000) {
 		timer_warn("[OUTPUT: %u] repaint delay is insane:%ld msec",
@@ -696,7 +710,50 @@ static s32 output_repaint_timer_handler(void *data)
 
 void clv_surface_destroy(struct clv_surface *s)
 {
+/*
+	clv_debug("----- destroy surface: %p", s);
+	clv_debug("----- del flip_listener %p", &s->flip_listener);
+	{
+		struct clv_listener *li;
+		s32 cnt = 0;
+
+		list_for_each_entry(li, &s->primary_output->flip_signal.listener_list, link) {
+			cnt++;
+			clv_debug("----- B listener %p", li);
+			if (cnt > 3) {
+				break;
+			}
+		}
+	}
+	clv_debug("----- before del %p -> %p -> %p -> %p -> %p",
+	     &s->primary_output->flip_signal.listener_list,
+	     s->primary_output->flip_signal.listener_list.next,
+	     s->primary_output->flip_signal.listener_list.next->next,
+	     s->primary_output->flip_signal.listener_list.next->next->next,
+	     s->primary_output->flip_signal.listener_list.next->next->next->next);
+*/
 	list_del(&s->flip_listener.link);
+	INIT_LIST_HEAD(&s->flip_listener.link);
+/*
+	clv_debug("----- after del %p -> %p -> %p -> %p -> %p",
+	     &s->primary_output->flip_signal.listener_list,
+	     s->primary_output->flip_signal.listener_list.next,
+	     s->primary_output->flip_signal.listener_list.next->next,
+	     s->primary_output->flip_signal.listener_list.next->next->next,
+	     s->primary_output->flip_signal.listener_list.next->next->next->next);
+	{
+		struct clv_listener *li;
+		s32 cnt = 0;
+
+		list_for_each_entry(li, &s->primary_output->flip_signal.listener_list, link) {
+			cnt++;
+			clv_debug("----- A listener %p", li);
+			if (cnt > 3) {
+				break;
+			}
+		}
+	}
+*/
 	INIT_LIST_HEAD(&s->flip_listener.link);
 	clv_signal_emit(&s->destroy_signal, NULL);
 
@@ -705,12 +762,15 @@ void clv_surface_destroy(struct clv_surface *s)
 	}
 	clv_region_fini(&s->opaque);
 	clv_region_fini(&s->damage);
-	
+	s->view = NULL;
+	memset(s, 0, sizeof(*s));
 	free(s);
+//	clv_debug("----- destroy surface over");
 }
 
 void clv_view_destroy(struct clv_view *v)
 {
+//	clv_debug("----- destroy view: %p", v);
 	if (v->surface) {
 		v->surface->view = NULL;
 	}
@@ -728,8 +788,21 @@ static void surface_flip_proc(struct clv_listener *listener, void *data)
 	//u32 output_mask = s->view->output_mask;
 	//struct clv_compositor *c = output->c;
 	s32 ret;
+/*
+	clv_debug("------ check surface %p's view %p", s, s->view);
+	clv_debug("----- listener = %p", listener);
+*/
+	if (!s->view) {
+		if (s) {
+			clv_err("surface %p, %ux%u", s, s->w, s->h);
+		}
+		clv_err("!s->view");
+		assert(0);
+		return;
+	}
 
 	if (s->view->need_to_draw) {
+//		clv_debug(" ----- need to draw");
 		return;
 	}
 
@@ -743,7 +816,7 @@ static void surface_flip_proc(struct clv_listener *listener, void *data)
 		list_del(&listener->link);
 		INIT_LIST_HEAD(&listener->link);
 		cmp_debug("************ Send bo complete sock = %d", sock);
-		printf("************ Send bo complete sock = %d\n", sock);
+		//printf("************ Send bo complete sock = %d\n", sock);
 		ret = clv_send(sock, s->agent->bo_complete_tx_cmd,
 				s->agent->bo_complete_tx_len);
 		if (ret < 0) {
@@ -751,26 +824,77 @@ static void surface_flip_proc(struct clv_listener *listener, void *data)
 			client_agent_destroy(s->agent);
 		}
 	}
+//	clv_debug("------ check surface over");
 }
 
 void clv_surface_add_flip_listener(struct clv_surface *s)
 {
 	struct clv_compositor *c = s->c;
 	struct clv_output *output;
+	struct clv_listener *li;
 
 	s->flip_listener.notify = surface_flip_proc;
 	if (!s->primary_output->enabled) {
+		list_del(&s->flip_listener.link);
+		INIT_LIST_HEAD(&s->flip_listener.link);
 		list_for_each_entry(output, &c->outputs, link) {
 			if (output->enabled) {
 				s->primary_output = output;
-				cmp_warn("surface's primary_output routed.");
+				cmp_warn("surface's primary_output routed."
+					 "surf(%p %ux%u %d 0x%02X",
+					 s, s->w, s->h,
+					 s->primary_output->index,
+					 s->output_mask);
 				break;
 			}
 		}
 	}
+/*
+	clv_debug("----- ADD %ux%u %p to surface %p output %p (%d) flip_signal %p",
+		  s->w, s->h,
+		  &s->flip_listener, s, s->primary_output, s->primary_output->index,
+		  &s->primary_output->flip_signal);
+	clv_debug("----- before add %p -> %p -> %p -> %p -> %p",
+	     &s->primary_output->flip_signal.listener_list,
+	     s->primary_output->flip_signal.listener_list.next,
+	     s->primary_output->flip_signal.listener_list.next->next,
+	     s->primary_output->flip_signal.listener_list.next->next->next,
+	     s->primary_output->flip_signal.listener_list.next->next->next->next);
+*/
+	list_for_each_entry(li, &s->primary_output->flip_signal.listener_list,
+				link) {
+		if (li == &s->flip_listener) {
+			cmp_err("already added flip listener, skip!"
+				"surf %p %ux%u %d %02X", s, s->w, s->h,
+				s->primary_output->index, s->output_mask);
+			return;
+		}
+	}
 	clv_signal_add(&s->primary_output->flip_signal, &s->flip_listener);
+/*
+	clv_debug("----- after add %p -> %p -> %p -> %p -> %p",
+	     &s->primary_output->flip_signal.listener_list,
+	     s->primary_output->flip_signal.listener_list.next,
+	     s->primary_output->flip_signal.listener_list.next->next,
+	     s->primary_output->flip_signal.listener_list.next->next->next,
+	     s->primary_output->flip_signal.listener_list.next->next->next->next);
+*/
 	cmp_debug("Set view %p's need_to_draw as 1", s->view);
+//	clv_debug("----- Set view %p's need_to_draw as 1", s->view);
 	s->view->need_to_draw = 1;
+/*
+	{
+		s32 cnt = 0;
+
+		list_for_each_entry(li, &s->primary_output->flip_signal.listener_list, link) {
+			cnt++;
+			clv_debug("----- listener %p", li);
+			if (cnt > 3) {
+				break;
+			}
+		}
+	}
+*/
 	if (list_empty(&s->primary_output->flip_signal.listener_list))
 		cmp_debug("empty!!!!!!!!!!!");
 	cmp_debug("output %p %u", s->primary_output, s->primary_output->index);
@@ -801,6 +925,8 @@ struct clv_surface *clv_surface_create(struct clv_compositor *c,
 
 	INIT_LIST_HEAD(&s->flip_listener.link);
 
+//	clv_debug("----- create surface %p", s);
+
 	return s;
 }
 
@@ -830,6 +956,7 @@ struct clv_view *clv_view_create(struct clv_surface *s,
 			break;
 		}
 	}
+//	clv_debug("----- create view %p", v);
 	if (s->primary_output)
 		return v;
 
@@ -873,6 +1000,38 @@ struct clv_buffer *shm_buffer_create(struct clv_bo_info *bi)
 	clv_shm_init(&buffer->shm, bi->name, buffer->base.size, 0);
 	INIT_LIST_HEAD(&buffer->base.link);
 	return &buffer->base;
+}
+
+void client_destroy_buf(struct clv_client_agent *agent, struct clv_buffer *buf)
+{
+	s32 is_overlay = 0;
+	struct clv_compositor *c = agent->c;
+
+	if (!buf->link.prev || !buf->link.next) {
+		clv_err("illegal link!!!!!!!!!!!!!!!!!");
+		assert(0);
+	}
+	list_del(&buf->link);
+	if (agent->view->type == CLV_VIEW_TYPE_OVERLAY)
+		is_overlay = 1;
+	if (buf->type == CLV_BUF_TYPE_DMA) {
+		if (is_overlay) {
+//			clv_debug("release dma buf %d", buf->fd);
+			cmp_debug("release drm dma buf! %p",
+				  buf->internal_fb);
+			close(buf->fd);
+			c->backend->dmabuf_destroy(
+				agent->surface->primary_output,
+				buf->internal_fb);
+			free(buf);
+		} else {
+			cmp_debug("release gl dma buf");
+			c->renderer->release_dmabuf(c, buf);
+		}
+	} else {
+		cmp_debug("release shm buf");
+		shm_buffer_destroy(buf);
+	}
 }
 
 void client_agent_destroy(struct clv_client_agent *agent)

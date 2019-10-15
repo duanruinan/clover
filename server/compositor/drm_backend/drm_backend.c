@@ -498,12 +498,15 @@ static void drm_fb_destroy(struct drm_fb *fb)
 
 static struct drm_fb *drm_fb_ref(struct drm_fb *fb)
 {
-	if (!fb)
+	if (!fb) {
+		drm_warn("fb == NULL");
 		return NULL;
+	}
 
 	drm_debug("[FB] ref+ %p", fb);
 	drm_debug("[FB] ref result %u", fb->refcnt+1);
 	fb->refcnt++;
+
 	return fb;
 }
 
@@ -546,9 +549,14 @@ static struct drm_fb *drm_fb_get_from_dmabuf(struct clv_buffer *buffer,
 	}
 
 	fb->w = buffer->w;
-	w_align = (buffer->w + 16 - 1) & ~(16 - 1);
 	fb->h = buffer->h;
-	h_align = (buffer->h + 16 - 1) & ~(16 - 1);
+	if (buffer->vstride) {
+		w_align = buffer->stride;
+		h_align = buffer->vstride;
+	} else {
+		w_align = (buffer->w + 16 - 1) & ~(16 - 1);
+		h_align = (buffer->h + 16 - 1) & ~(16 - 1);
+	}
 	fb->dma_fd = buffer->fd;
 	fb->fd = b->fd;
 	fb->bo = NULL;
@@ -594,15 +602,16 @@ static struct drm_fb *drm_fb_get_from_dmabuf(struct clv_buffer *buffer,
 
 static void drm_fb_unref(struct drm_fb *fb)
 {
-	if (!fb)
+	if (!fb) {
+		drm_warn("fb == NULL");
 		return;
+	}
 	drm_debug("[FB] unref- %p", fb);
 	drm_debug("[FB] unref result %u", fb->refcnt - 1);
 
 	//assert(fb->refcnt > 0);
 	if (fb->refcnt <= 0) {
-		//printf("fb->refcnt = %u\n", fb->refcnt);
-		//printf("fb->type = %u\n", fb->type);
+		clv_err("fb->refcnt <= 0 %d", fb->refcnt);
 		getchar();
 	}
 	if (--fb->refcnt > 0)
@@ -611,7 +620,6 @@ static void drm_fb_unref(struct drm_fb *fb)
 	switch (fb->type) {
 	case DRM_BUF_CURSOR:
 		drm_debug("[FB] Real destroy cursor bo");
-		//printf("[FB] Real destroy cursor bo\n");
 		gbm_bo_destroy(fb->bo);
 		break;
 	case DRM_BUF_GBM_SURFACE:
@@ -620,7 +628,6 @@ static void drm_fb_unref(struct drm_fb *fb)
 		break;
 	case DRM_BUF_DMABUF:
 		drm_debug("[FB] Real destroy dmabuf bo");
-		//printf("[FB] Real destroy dmabuf bo\n");
 		drm_fb_destroy_dmabuf(fb);
 		break;
 	default:
@@ -639,8 +646,10 @@ static void drm_dmabuf_destroy(struct clv_output *out, void *buffer)
 	struct drm_plane_state *ps, *next;
 
 	drm_debug("destroy dmabuf %p", buffer);
-	if (!fb)
+	if (!fb) {
+		drm_warn("fb == NULL");
 		return;
+	}
 	//fb->refcnt = 1;
 
 	output = container_of(out, struct drm_output, base);
@@ -666,7 +675,7 @@ static void drm_dmabuf_destroy(struct clv_output *out, void *buffer)
 			}
 		}
 	}
-	
+
 	drm_fb_unref(fb);
 }
 
@@ -729,6 +738,7 @@ static void page_flip_handler(s32 fd, u32 crtc_id, u32 frame, u32 sec, u32 usec,
 	struct drm_backend *b = data;
 	struct drm_output *output;
 	s32 find = 0;
+//	struct timespec now;
 	
 	drm_debug("crtc_id = %u", crtc_id);
 	list_for_each_entry(output, &b->outputs, link) {
@@ -738,10 +748,18 @@ static void page_flip_handler(s32 fd, u32 crtc_id, u32 frame, u32 sec, u32 usec,
 		}
 	}
 	assert(find);
-	drm_debug("[atomic][CRTC: %u] page flip processing started", crtc_id);
+//	clock_gettime(b->c->clk_id, &now);
+//	clv_debug("[atomic] [CRTC: %u] page flip processing started, %ld, %ld",
+//		  crtc_id,
+//		  now.tv_sec, now.tv_nsec / 1000000l);
+	drm_debug("[atomic] [CRTC: %u] page flip processing started", crtc_id);
 	assert(output->atomic_complete_pending);
 	output->atomic_complete_pending = 0;
 	drm_output_update_complete(output, sec, usec);
+//	clock_gettime(b->c->clk_id, &now);
+//	clv_debug("[atomic] [CRTC: %u] page flip processing end, %ld, %ld",
+//		  crtc_id,
+//		  now.tv_sec, now.tv_nsec / 1000000l);
 	drm_debug("[atomic] [CRTC: %u] page flip processing end", crtc_id);
 }
 
@@ -958,8 +976,9 @@ static void drm_output_state_free(struct drm_output_state *state)
 		return;
 
 	ps_debug("free output %u's state", state->output->index);
-	list_for_each_entry_safe(ps, next, &state->plane_states, link)
+	list_for_each_entry_safe(ps, next, &state->plane_states, link) {
 		drm_plane_state_free(ps, 0);
+	}
 
 	list_del(&state->link);
 
@@ -994,8 +1013,9 @@ static void drm_output_assign_state(struct drm_output_state *state,s32 is_async)
 	list_for_each_entry(plane_state, &state->plane_states, link) {
 		struct drm_plane *plane = plane_state->plane;
 
-		if (plane->state_cur && !plane->state_cur->output_state)
+		if (plane->state_cur && !plane->state_cur->output_state) {
 			drm_plane_state_free(plane->state_cur, 1);
+		}
 		ps_debug("plane %u's state_cur = %p", plane->index,
 			 plane_state);
 		plane->state_cur = plane_state;
@@ -1015,7 +1035,7 @@ static s32 drm_output_apply_state_atomic(struct drm_output_state *state,
 {
 	struct drm_output *output = state->output;
 	struct drm_backend *b = to_drm_backend(output->base.c);
-	struct drm_plane_state *plane_state;
+	struct drm_plane_state *plane_state, *next;
 	struct drm_mode *current_mode = to_drm_mode(output->base.current_mode);
 	s32 ret = 0;
 
@@ -1053,10 +1073,16 @@ static s32 drm_output_apply_state_atomic(struct drm_output_state *state,
 					 output->head->prop_crtc_id, 0);
 	}
 
-	list_for_each_entry(plane_state, &state->plane_states, link) {
+	list_for_each_entry_safe(plane_state, next, &state->plane_states, link){
 		struct drm_plane *plane = plane_state->plane;
 
 		if (plane_state->fb) {
+			if (!plane) {
+				drm_err("plane_state %p's plane == NULL, free",
+					plane_state);
+				drm_plane_state_free(plane_state, 1);
+				continue;
+			}
 			drm_debug("plane->index = %u, type = %u",
 				plane->index, plane->type);
 			if (plane->type == DRM_OVERLAY_PL) {
@@ -1075,6 +1101,9 @@ static s32 drm_output_apply_state_atomic(struct drm_output_state *state,
 			drm_debug("[MODESET] Clr output %u's plane %u",
 				  output->index, plane->index);
 		}
+//		if (plane_state->fb)
+//			clv_debug("apply fb's fd %d", plane_state->fb->dma_fd);
+		
 		drmModeAtomicAddProperty(req, plane->plane_id,
 					 plane->prop_fb_id,
 					 plane_state->fb ?
@@ -1234,6 +1263,9 @@ static s32 drm_pending_state_apply_atomic(struct drm_pending_state *ps,
 	timer_debug("AtomicCommit [%s] now: %ld,%ld",
 		    flags & DRM_MODE_ATOMIC_ALLOW_MODESET ? "MODSET" : "NORMAL",
 		    now.tv_sec, now.tv_nsec / 1000000l);
+//	clv_debug("AtomicCommit [%s] now: %ld,%ld",
+//		    flags & DRM_MODE_ATOMIC_ALLOW_MODESET ? "MODSET" : "NORMAL",
+//		    now.tv_sec, now.tv_nsec / 1000000l);
 	ret = drmModeAtomicCommit(b->fd, req, flags, b);
 	drm_debug("[atomic] drmModeAtomicCommit");
 	clock_gettime(b->c->clk_id, &t4);
@@ -1598,15 +1630,16 @@ static void drm_output_start_repaint_loop(struct clv_output *base)
 		//}
 	}
 
-/*
+
 	drm_debug("ret = %d vbl.replay %lu %lu %d %d", ret, vbl.reply.tval_sec,
 		  vbl.reply.tval_usec,
 		  vbl.reply.tval_sec > 0, vbl.reply.tval_usec > 0);
-	drm_debug("%lu %lu", timespec_to_nsec(&vbl2now) / 1000000l,
-		  refresh_nsec / 1000000l);
-*/
+//	drm_debug("%lu %lu", timespec_to_nsec(&vbl2now) / 1000000l,
+//		  refresh_nsec / 1000000l);
 
-	assert(0);
+
+//	assert(0);
+	clv_output_finish_frame(base, NULL);
 
 	return;
 
@@ -1633,6 +1666,7 @@ static void drm_plane_state_put_back(struct drm_plane_state *state)
 
 	state_output = state->output_state;
 	plane = state->plane;
+	clv_debug("call plane state free");
 	drm_plane_state_free(state, 0);
 
 	if (!plane->state_cur->fb)
@@ -1713,7 +1747,7 @@ static void drm_output_render(struct drm_output_state *state)
 	}
 
 	if (!fb) {
-		assert(0);
+		//assert(0);
 		drm_plane_state_put_back(primary_state);
 		return;
 	}
@@ -1960,6 +1994,7 @@ static struct drm_plane_state * drm_output_prepare_overlay_view(
 		return NULL;
 	}
 	state->fb = v->curr_dmafb;
+//	clv_debug("state->fb->dma_fd = %d", state->fb->dma_fd);
 
 	calc = output->base.current_mode->w * output->base.render_area.h
 		/ output->base.render_area.w;
@@ -2080,6 +2115,18 @@ static void drm_output_fini_egl(struct drm_output *output)
 		output->primary_plane->state_cur->complete = 1;
 	}
 
+	if (output->overlay_plane && output->overlay_plane->state_cur) {
+		drm_debug("free overlay plane state");
+		if (output->overlay_plane->state_cur->fb) {
+			drm_plane_state_free(output->overlay_plane->state_cur,
+					     1);
+			output->overlay_plane->state_cur
+				= drm_plane_state_alloc(output->overlay_plane,
+							NULL);
+			output->overlay_plane->state_cur->complete = 1;
+		}
+	}
+
 	gl_renderer->output_destroy(&output->base);
 	if (output->gbm_surface) {
 		gbm_surface_destroy(output->gbm_surface);
@@ -2174,6 +2221,12 @@ static void drm_output_enable(struct clv_output *base,
 		  base->render_area.pos.x, base->render_area.pos.y,
 		  base->render_area.w, base->render_area.h);
 	drm_output_init_egl(output);
+#ifdef CLEAN_FLIP_LISTENER_WHEN_DISABLE
+	/*
+	 * reinit flip_signal list.
+	 */
+	clv_signal_init(&base->flip_signal);
+#endif
 	base->enabled = 1;
 	drm_debug("CRTC %u is enabled.", output->crtc_id);
 }
@@ -2182,6 +2235,9 @@ static s32 drm_output_disable(struct clv_output *base)
 {
 	struct drm_output *output = to_drm_output(base);
 	struct drm_pending_state *ps;
+#ifdef CLEAN_FLIP_LISTENER_WHEN_DISABLE
+	struct clv_listener *l, *next;
+#endif
 
 	if (!base->enabled && !output->disable_pending)
 		return 0;
@@ -2198,6 +2254,18 @@ static s32 drm_output_disable(struct clv_output *base)
 	drm_output_get_disable_state(ps, output);
 	drm_pending_state_apply_sync(ps);
 	output->disable_pending = 0;
+#ifdef CLEAN_FLIP_LISTENER_WHEN_DISABLE
+	/*
+	 * remove all page flip listener,
+	 * to prevent there is invalid listener in the list.
+	 */
+	list_for_each_entry_safe(l, next,
+				 &base->flip_signal.listener_list,
+				link) {
+		list_del(&l->link);
+		INIT_LIST_HEAD(&l->link);
+	}
+#endif
 	base->enabled = 0;
 	drm_debug("CRTC %u is disabled.", output->crtc_id);
 	return 0;
@@ -2284,8 +2352,10 @@ static struct drm_plane_state *drm_plane_state_dup(
 
 	list_for_each_entry_safe(old, tmp, &state_output->plane_states, link) {
 		assert(old != src);
-		if (old->plane == dst->plane)
+		if (old->plane == dst->plane) {
+			clv_debug("call plane state free");
 			drm_plane_state_free(old, 0);
+		}
 	}
 
 	list_add_tail(&state_output->plane_states, &dst->link);

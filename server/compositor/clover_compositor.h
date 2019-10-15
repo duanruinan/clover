@@ -174,7 +174,8 @@ struct clv_view {
 
 struct clv_buffer {
 	enum clv_buffer_type type;
-	u32 w, h, stride;
+	u32 w, h, stride, vstride;
+	s32 use_vstride;
 	u32 size;
 	enum clv_pixel_fmt pixel_fmt;
 	s32 count_planes;
@@ -351,6 +352,7 @@ struct clv_renderer {
 					     u32 w,
 					     u32 h,
 					     u32 stride,
+					     u32 vstride,
 					     enum clv_pixel_fmt pixel_fmt,
 					     u32 internal_fmt);
 	void (*release_dmabuf)(struct clv_compositor *c,
@@ -473,6 +475,7 @@ struct clv_client_agent *client_agent_create(
 	struct clv_server *s,
 	s32 sock,
 	s32 (*client_sock_cb)(s32 fd, u32 mask, void *data));
+void client_destroy_buf(struct clv_client_agent *agent, struct clv_buffer *buf);
 void client_agent_destroy(struct clv_client_agent *agent);
 struct clv_buffer *shm_buffer_create(struct clv_bo_info *bi);
 void shm_buffer_destroy(struct clv_buffer *buffer);

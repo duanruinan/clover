@@ -164,6 +164,7 @@ static void head_state_changed_cb(struct clv_listener *listener, void *data)
 
 	for (i = 0; i < server.config->count_heads; i++) {
 		if (!server.outputs[i]) {
+			clv_debug("=== create backend output %u", i);
 			output = b->output_create(c, &server.config->heads[i]);
 			if (!output) {
 				com_err("failed to create output.");
@@ -180,6 +181,7 @@ static void head_state_changed_cb(struct clv_listener *listener, void *data)
 		if (head->connected) {
 			clv_compositor_choose_mode(output,
 						   &server.config->heads[i]);
+			com_info("enable output[%d]", output->index);
 			output->enable(output,
 			  &server.config->heads[i].encoder.output.render_area);
 			//printf("Head change schedule repaint\n");
@@ -192,6 +194,7 @@ static void head_state_changed_cb(struct clv_listener *listener, void *data)
 			system(head_status);
 			set_hpd_info(&hpd_info, i, 1);
 		} else {
+			com_info("disable output[%d]", output->index);
 			output->disable(output);
 			sprintf(head_status, "echo \"0x0\" > /tmp/head-%u",
 				head->index);
@@ -311,6 +314,7 @@ static s32 client_sock_cb(s32 fd, u32 mask, void *data)
 	struct clv_shell_info shell;
 	struct clv_buffer *buf;
 	struct timespec t1, t2;
+	//struct timespec ts1;
 	struct clv_config *config;
 	s32 i;
 
@@ -450,8 +454,14 @@ static s32 client_sock_cb(s32 fd, u32 mask, void *data)
 					buf->h = bi.height;
 					buf->fd = dmabuf_fd;
 					buf->stride = bi.stride;
+					if (bi.vstride)
+						buf->vstride = bi.vstride;
+					else
+						buf->vstride = 0;
 					buf->internal_fb = NULL;
 					if (bi.fmt == CLV_PIXEL_FMT_NV12) {
+//						clv_debug("receive fd %d",
+//							buf->fd);
 						buf->size = bi.stride*bi.height
 								* 3 / 2;
 						buf->pixel_fmt
@@ -466,7 +476,7 @@ static s32 client_sock_cb(s32 fd, u32 mask, void *data)
 					buf = agent->c->renderer->import_dmabuf(
 						agent->c, dmabuf_fd,
 						bi.width, bi.height,
-						bi.stride, bi.fmt,
+						bi.stride, bi.vstride, bi.fmt,
 						bi.internal_fmt);
 				}
 				assert(buf);
@@ -489,7 +499,22 @@ static s32 client_sock_cb(s32 fd, u32 mask, void *data)
 			client_agent_destroy(agent);
 			return -1;
 		}
+	} else if (flag & (1 << CLV_CMD_DESTROY_BO_SHIFT)) {
+		id = clv_server_parse_destroy_bo_cmd(agent->ipc_rx_buf);
+		if (!id) {
+			com_err("failed to parse destroy bo command from "
+				"agent 0x%08lX", (u64)agent);
+		} else {
+			buf = (struct clv_buffer *)id;
+			com_debug("parse destroy bo command ok. bo_id = %lu",
+				  id);
+//			clv_debug("parse destroy bo command ok. bo_id = %lu",
+//				  id);
+			client_destroy_buf(agent, buf);
+		}
 	} else if (flag & (1 << CLV_CMD_COMMIT_SHIFT)) {
+		//clock_gettime(CLOCK_MONOTONIC, &ts1);
+		//clv_debug("r: %3d.%06d", ts1.tv_sec, ts1.tv_nsec/1000000l);
 		ret = clv_server_parse_commit_req_cmd(agent->ipc_rx_buf, &ci);
 		if (ret < 0) {
 			com_err("failed to parse commit command from "
@@ -519,6 +544,9 @@ static s32 client_sock_cb(s32 fd, u32 mask, void *data)
 				if (agent->view->type == CLV_VIEW_TYPE_CURSOR) {
 					com_debug("receive cursor bo %lu's cmt",
 						  ci.bo_id);
+					if (agent->view->cursor_buf != buf) {
+						clv_debug("cursor bo changed.");
+					}
 					agent->view->cursor_buf = buf;
 				}
 				clv_region_fini(&agent->surface->damage);
@@ -565,6 +593,8 @@ static s32 client_sock_cb(s32 fd, u32 mask, void *data)
 					com_debug("attach dma buf %p", buf);
 					agent->view->last_dmafb = 
 						agent->view->curr_dmafb;
+					//clock_gettime(CLOCK_MONOTONIC, &ts1);
+					//clv_debug("rr: %3d.%06d", ts1.tv_sec, ts1.tv_nsec/1000000l);
 					agent->view->curr_dmafb = 
 					    agent->c->backend->import_dmabuf(
 					        agent->c, buf);

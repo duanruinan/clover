@@ -179,7 +179,7 @@ struct clv_bo_info {
 	u32 internal_fmt;
 	u32 count_planes;
 	char name[CLV_BUFFER_NAME_LEN];
-	u32 width, stride, height;
+	u32 width, stride, vstride, height;
 	u64 surface_id;
 };
 

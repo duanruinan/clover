@@ -1814,6 +1814,7 @@ static void gl_dmabuf_release(struct clv_compositor *c,
 static struct clv_buffer *gl_import_dmabuf(struct clv_compositor *c,
 					   s32 fd, u32 w, u32 h,
 					   u32 stride,
+					   u32 vstride,
 					   enum clv_pixel_fmt pixel_fmt,
 					   u32 internal_fmt)
 {
@@ -1867,8 +1868,13 @@ static struct clv_buffer *gl_import_dmabuf(struct clv_compositor *c,
 		printf("w = %u h = %u fd = %d pixel_fmt = %u stride = %u\n",
 			w, h, fd, pixel_fmt, stride);
 	} else if (dma_buf->base.pixel_fmt == CLV_PIXEL_FMT_NV12) {
-		w_align = (w + 16 - 1) & ~(16 - 1);
-		h_align = (h + 16 - 1) & ~(16 - 1);
+		if (vstride) {
+			w_align = stride;
+			h_align = vstride;
+		} else {
+			w_align = (w + 16 - 1) & ~(16 - 1);
+			h_align = (h + 16 - 1) & ~(16 - 1);
+		}
 		attribs[attrib++] = EGL_WIDTH;
 		attribs[attrib++] = w;
 		attribs[attrib++] = EGL_HEIGHT;
@@ -1896,8 +1902,13 @@ static struct clv_buffer *gl_import_dmabuf(struct clv_compositor *c,
 		printf("w = %u h = %u fd = %d pixel_fmt = %u stride = %u\n",
 			w, h, fd, pixel_fmt, w_align);
 	} else if (dma_buf->base.pixel_fmt == CLV_PIXEL_FMT_NV16) {
-		w_align = (w + 16 - 1) & ~(16 - 1);
-		h_align = (h + 16 - 1) & ~(16 - 1);
+		if (vstride) {
+			w_align = stride;
+			h_align = vstride;
+		} else {
+			w_align = (w + 16 - 1) & ~(16 - 1);
+			h_align = (h + 16 - 1) & ~(16 - 1);
+		}
 		attribs[attrib++] = EGL_WIDTH;
 		attribs[attrib++] = w;
 		attribs[attrib++] = EGL_HEIGHT;
