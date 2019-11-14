@@ -72,6 +72,7 @@ struct input_display {
 	struct clv_event_source *clv_source;
 	struct clv_event_source *server_source;
 	struct clv_event_source *repaint_source;
+	struct clv_event_source *timeout_source;
 	s32 repaint_damage;
 	s32 server_sock;
 	struct list_head clients;
@@ -248,6 +249,9 @@ static void input_display_destroy(struct input_display *disp)
 
 	if (disp->repaint_source)
 		clv_event_source_remove(disp->repaint_source);
+
+	if (disp->timeout_source)
+		clv_event_source_remove(disp->timeout_source);
 
 	if (disp->server_source)
 		clv_event_source_remove(disp->server_source);
@@ -739,6 +743,16 @@ static s32 timer_proc(void *data)
 	return 0;
 }
 
+static s32 timeout_proc(void *data)
+{
+	struct input_display *disp = data;
+
+	clv_event_source_timer_update(disp->timeout_source, 0, 0);
+	clv_debug("cursor pending timeout !!!");
+	disp->cursor_pending = 0;
+	return 0;
+}
+
 static void schedule_repaint_cursor(struct input_display *disp)
 {
 	clv_event_source_timer_update(disp->repaint_source, 1, 0);
@@ -830,6 +844,7 @@ static void redraw_cursor(struct input_display *disp, s32 damage, u8 *data,
 	if (damage) {
 		disp->back_buf = 1 - disp->back_buf;
 		disp->need_wait_bo_complete = 1;
+		clv_event_source_timer_update(disp->timeout_source, 200, 0);
 	} else {
 		disp->need_wait_bo_complete = 0;
 	}
@@ -1015,6 +1030,7 @@ static s32 clv_event_proc(s32 fd, u32 mask, void *data)
 			//clv_debug("receive bo complete.");
 			id = clv_client_parse_bo_complete_cmd(disp->ipc_rx_buf);
 			disp->cursor_pending = 0;
+			clv_event_source_timer_update(disp->timeout_source,0,0);
 		} else if (flag & (1 << CLV_CMD_DESTROY_ACK_SHIFT)) {
 			clv_debug("receive destroy ack");
 		} else if (flag & (1 << CLV_CMD_HPD_SHIFT)) {
@@ -1195,6 +1211,11 @@ static struct input_display *input_display_create(void)
 	disp->repaint_source = clv_event_loop_add_timer(disp->loop,
 							timer_proc, disp);
 	if (!disp->repaint_source)
+		goto err;
+
+	disp->timeout_source = clv_event_loop_add_timer(disp->loop,
+							timeout_proc, disp);
+	if (!disp->timeout_source)
 		goto err;
 
 	INIT_LIST_HEAD(&disp->devs);
