@@ -456,6 +456,8 @@ void clv_display_stop(struct clv_display *display);
 void clv_display_destroy(struct clv_display *display);
 void clv_compositor_choose_mode(struct clv_output *output,
 				struct clv_head_config *head_cfg);
+void clv_compositor_choose_mode_manually(struct clv_output *output,
+					 struct clv_rect *rc);
 void clv_output_schedule_repaint(struct clv_output *output, s32 cnt);
 void clv_output_schedule_repaint_reset(struct clv_output *output);
 void clv_compositor_schedule_repaint(struct clv_compositor *c);

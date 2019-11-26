@@ -377,6 +377,50 @@ void clv_compositor_schedule_heads_changed(struct clv_compositor *c)
 /*
  * Set output->current_mode
  */
+void clv_compositor_choose_mode_manually(struct clv_output *output,
+					 struct clv_rect *rc)
+{
+	u32 width, height;
+	struct clv_mode *mode;
+	s32 f = 0;
+
+	width = rc->w;
+	height = rc->h;
+
+	list_for_each_entry(mode, &output->modes, link) {
+		if (mode->flags & MODE_PREFERRED) {
+			f = 1;
+			break;
+		}
+	}
+
+	if (f) {
+		if (mode->w <= width && mode->h <= height) {
+			output->current_mode = mode;
+			cmp_debug("Use preferred mode %ux%u",
+				  output->current_mode->w,
+				  output->current_mode->h);
+			return;
+		}
+	}
+
+	list_for_each_entry(mode, &output->modes, link) {
+		if (mode->w <= width && mode->h <= height) {
+			output->current_mode = mode;
+			cmp_debug("Use mode %ux%u",
+				  output->current_mode->w,
+				  output->current_mode->h);
+			return;
+		}
+	}
+
+	cmp_err("cannot choose mode");
+	assert(0);
+}
+
+/*
+ * Set output->current_mode
+ */
 void clv_compositor_choose_mode(struct clv_output *output,
 				struct clv_head_config *head_cfg)
 {
@@ -414,6 +458,7 @@ void clv_compositor_choose_mode(struct clv_output *output,
 		}
 	}
 
+	cmp_err("cannot choose mode");
 	assert(0);
 }
 

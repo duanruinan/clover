@@ -217,6 +217,7 @@ static void update_layout(struct clv_compositor *c, struct clv_shell_info *si)
 	s32 i;
 	struct clv_output_config *output_cfg;
 	struct clv_rect *rc;
+	struct clv_head *head;
 
 	com_debug("update screen layout");
 	config = server.config;
@@ -282,6 +283,20 @@ static void update_layout(struct clv_compositor *c, struct clv_shell_info *si)
 		if ((!output_cfg->render_area.w &&
 		            !output_cfg->render_area.h) &&
 		           (rc->w && rc->h)) {
+			if (output->current_mode == NULL) {
+				com_warn("output's current_mode == NULL!!!!!");
+				com_warn("output's current_mode == NULL!!!!!");
+				com_warn("output's current_mode == NULL!!!!!");
+				head = output->head;
+				head->retrieve_modes(head);
+				if (!head->connected) {
+					com_warn("head %u not connected, "
+						 "do nothing.", head->index);
+					continue;
+				}
+				clv_compositor_choose_mode_manually(output, rc);
+				assert(output->current_mode);
+			}
 			com_info("enable output[%d]", output->index);
 			output->enable(output, rc);
 			clv_output_schedule_repaint_reset(output);
@@ -524,7 +539,10 @@ static s32 client_sock_cb(s32 fd, u32 mask, void *data)
 			buf = (struct clv_buffer *)(ci.bo_id);
 			com_debug("parse commit command ok. bo_id = %lu",
 				  ci.bo_id);
-			assert(ci.bo_id);
+			if (!ci.bo_id) {
+				com_err("commit bo_id == 0!!!");
+				goto ack_commit;
+			}
 			agent->view->area.pos.x = ci.view_x;
 			agent->view->area.pos.y = ci.view_y;
 			com_debug("set view %p pos: %d, %d", agent->view,
@@ -618,6 +636,7 @@ static s32 client_sock_cb(s32 fd, u32 mask, void *data)
 			}
 			id = 1;
 		}
+ack_commit:
 		clv_dup_commit_ack_cmd(agent->commit_ack_tx_cmd,
 				    agent->commit_ack_tx_cmd_t,
 				    agent->commit_ack_tx_len, id);
