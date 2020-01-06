@@ -46,7 +46,7 @@ dmabuf.o: dmabuf.c $(CLOVER_UTILS_H)
 
 clover_input: input.o \
 		$(RPATH)/utils/libclover_utils.so
-	$(CC) $< $(LDFLAGS) -ludev -o $@
+	$(CC) $< $(LDFLAGS) -ludev -lm -o $@
 
 input.o: input.c $(CLOVER_UTILS_H)
 	$(CC) -c $< -I. $(CFLAGS) -o $@

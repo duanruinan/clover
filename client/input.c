@@ -10,6 +10,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/ioctl.h>
+#include <math.h>
 #include <assert.h>
 #include <linux/input.h>
 #include <libudev.h>
@@ -60,6 +61,8 @@ struct input_client {
 struct input_display {
 	struct udev *udev;
 	struct udev_monitor *udev_monitor;
+	struct clv_shm accel_fac_shm;
+	float *accel_fac;
 	struct clv_rect global_area[MAX_DESKTOP_NR];
 	struct clv_rect area[MAX_DESKTOP_NR];
 	s32 count_areas;
@@ -318,6 +321,8 @@ static void input_display_destroy(struct input_display *disp)
 
 	if (disp->tx_buf)
 		free(disp->tx_buf);
+
+	clv_shm_release(&disp->accel_fac_shm);
 
 	free(disp);
 }
@@ -626,9 +631,11 @@ static void event_proc(struct input_display *disp, struct input_event *evts,
 				break;
 			case REL_X:
 				dx = disp->buffer[src].value;
+				dx = floor((float)dx * (*disp->accel_fac));
 				break;
 			case REL_Y:
 				dy = disp->buffer[src].value;
+				dy = floor((float)dy * (*disp->accel_fac));
 				break;
 			default:
 				break;
@@ -1170,6 +1177,11 @@ static struct input_display *input_display_create(void)
 		goto err;
 
 	memset(disp, 0, sizeof(*disp));
+
+	clv_shm_init(&disp->accel_fac_shm, "cursor_accel", 32, 1);
+	disp->accel_fac = (float *)disp->accel_fac_shm.map;
+	*disp->accel_fac = 1.0f;
+
 	disp->buffer_sz = sizeof(struct input_event) * 1024;
 	disp->buffer = (struct input_event *)malloc(disp->buffer_sz);
 	if (!disp->buffer)
