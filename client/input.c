@@ -586,28 +586,44 @@ static void mouse_move_proc(struct input_display *disp, s32 dx, s32 dy)
 
 static void cursor_accel_set(s32 *dx, s32 *dy, float factor)
 {
-	float f;
+	float fx, fy;
 
 	if (factor <= 1.0f)
 		return;
 
-	f = factor - 1.0f;
+	fx = factor - 1.0f;
 
 	if ((*dx >= CURSOR_ACCEL_THRESHOLD_D)
 	    || (*dx <= -CURSOR_ACCEL_THRESHOLD_D))
-		f = 1 + f;
+		fx = 1 + fx;
 	else if ((*dx >= CURSOR_ACCEL_THRESHOLD_C)
 	    || (*dx <= -CURSOR_ACCEL_THRESHOLD_C))
-		f = 1 + f / 4 * 3;
+		fx = 1 + fx / 4 * 3;
 	else if ((*dx >= CURSOR_ACCEL_THRESHOLD_B)
 	    || (*dx <= -CURSOR_ACCEL_THRESHOLD_B))
-		f = 1 + f / 4 * 2;
+		fx = 1 + fx / 4 * 2;
 	else if ((*dx >= CURSOR_ACCEL_THRESHOLD_A)
 	    || (*dx <= -CURSOR_ACCEL_THRESHOLD_A))
-		f = 1 + f / 4;
+		fx = 1 + fx / 4;
 
-	*dx = *dx * f;
-	*dy = *dy * f;
+	*dx = *dx * fx;
+
+	fy = factor - 1.0f;
+
+	if ((*dx >= CURSOR_ACCEL_THRESHOLD_D)
+	    || (*dx <= -CURSOR_ACCEL_THRESHOLD_D))
+		fy = 1 + fy;
+	else if ((*dx >= CURSOR_ACCEL_THRESHOLD_C)
+	    || (*dx <= -CURSOR_ACCEL_THRESHOLD_C))
+		fy = 1 + fy / 4 * 3;
+	else if ((*dx >= CURSOR_ACCEL_THRESHOLD_B)
+	    || (*dx <= -CURSOR_ACCEL_THRESHOLD_B))
+		fy = 1 + fy / 4 * 2;
+	else if ((*dx >= CURSOR_ACCEL_THRESHOLD_A)
+	    || (*dx <= -CURSOR_ACCEL_THRESHOLD_A))
+		fy = 1 + fy / 4;
+
+	*dy = *dy * fy;
 }
 
 static void event_proc(struct input_display *disp, struct input_event *evts,
