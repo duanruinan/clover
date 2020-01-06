@@ -10,7 +10,6 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/ioctl.h>
-#include <math.h>
 #include <assert.h>
 #include <linux/input.h>
 #include <libudev.h>
@@ -23,6 +22,11 @@
 
 #define CURSOR_MAX_WIDTH 64
 #define CURSOR_MAX_HEIGHT 64
+
+#define CURSOR_ACCEL_THRESHOLD_A 20
+#define CURSOR_ACCEL_THRESHOLD_B 30
+#define CURSOR_ACCEL_THRESHOLD_C 40
+#define CURSOR_ACCEL_THRESHOLD_D 50
 
 static s32 has_kbd = 0;
 
@@ -580,6 +584,32 @@ static void mouse_move_proc(struct input_display *disp, s32 dx, s32 dy)
 	redraw_cursor(disp, 0, NULL, 64, 64);
 }
 
+static void cursor_accel_set(s32 *dx, s32 *dy, float factor)
+{
+	float f;
+
+	if (factor <= 1.0f)
+		return;
+
+	f = factor - 1.0f;
+
+	if ((*dx >= CURSOR_ACCEL_THRESHOLD_D)
+	    || (*dx <= -CURSOR_ACCEL_THRESHOLD_D))
+		f = 1 + f;
+	else if ((*dx >= CURSOR_ACCEL_THRESHOLD_C)
+	    || (*dx <= -CURSOR_ACCEL_THRESHOLD_C))
+		f = 1 + f / 4 * 3;
+	else if ((*dx >= CURSOR_ACCEL_THRESHOLD_B)
+	    || (*dx <= -CURSOR_ACCEL_THRESHOLD_B))
+		f = 1 + f / 4 * 2;
+	else if ((*dx >= CURSOR_ACCEL_THRESHOLD_A)
+	    || (*dx <= -CURSOR_ACCEL_THRESHOLD_A))
+		f = 1 + f / 4;
+
+	*dx = *dx * f;
+	*dy = *dy * f;
+}
+
 static void event_proc(struct input_display *disp, struct input_event *evts,
 		       s32 cnt)
 {
@@ -594,6 +624,7 @@ static void event_proc(struct input_display *disp, struct input_event *evts,
 		switch (disp->buffer[src].type) {
 		case EV_SYN:
 			if (dx || dy) {
+				cursor_accel_set(&dx, &dy, *disp->accel_fac);
 				mouse_move_proc(disp, dx, dy);
 				disp->tx_buf[dst].type = EV_ABS;
 				disp->tx_buf[dst].code = ABS_X | ABS_Y;
@@ -631,11 +662,9 @@ static void event_proc(struct input_display *disp, struct input_event *evts,
 				break;
 			case REL_X:
 				dx = disp->buffer[src].value;
-				dx = floor((float)dx * (*disp->accel_fac));
 				break;
 			case REL_Y:
 				dy = disp->buffer[src].value;
-				dy = floor((float)dy * (*disp->accel_fac));
 				break;
 			default:
 				break;
