@@ -192,11 +192,18 @@ static void head_state_changed_cb(struct clv_listener *listener, void *data)
 				output->current_mode->h,
 				head->index);
 			system(head_status);
+			sprintf(head_status, "echo \"%u\" > /tmp/vfreq-%u",
+				output->current_mode->refresh,
+				head->index);
+			system(head_status);
 			set_hpd_info(&hpd_info, i, 1);
 		} else {
 			com_info("disable output[%d]", output->index);
 			output->disable(output);
 			sprintf(head_status, "echo \"0x0\" > /tmp/head-%u",
+				head->index);
+			system(head_status);
+			sprintf(head_status, "echo \"0\" > /tmp/vfreq-%u",
 				head->index);
 			system(head_status);
 			set_hpd_info(&hpd_info, i, 0);
