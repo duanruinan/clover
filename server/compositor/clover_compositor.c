@@ -378,11 +378,13 @@ void clv_compositor_schedule_heads_changed(struct clv_compositor *c)
  * Set output->current_mode
  */
 void clv_compositor_choose_mode_manually(struct clv_output *output,
-					 struct clv_rect *rc)
+					 struct clv_rect *rc,
+					 enum timing_select_method method)
 {
 	u32 width, height;
-	struct clv_mode *mode;
+	struct clv_mode *mode, *m, *mm;
 	s32 f = 0;
+	u32 refresh = 0;
 
 	width = rc->w;
 	height = rc->h;
@@ -396,6 +398,21 @@ void clv_compositor_choose_mode_manually(struct clv_output *output,
 
 	if (f) {
 		if (mode->w <= width && mode->h <= height) {
+			if (method == USE_HIGHVFREQ) {
+				mm = NULL;
+				list_for_each_entry(m, &output->modes, link) {
+					if (m->refresh > refresh) {
+						refresh = m->refresh;
+						mm = m;
+					}
+				}
+				if (mm) {
+					output->current_mode = mm;
+					cmp_debug("Use preferred mode %ux%u@%u",
+				  		  m->w, m->h, m->refresh);
+					return;
+				}
+			}
 			output->current_mode = mode;
 			cmp_debug("Use preferred mode %ux%u",
 				  output->current_mode->w,
@@ -422,12 +439,14 @@ void clv_compositor_choose_mode_manually(struct clv_output *output,
  * Set output->current_mode
  */
 void clv_compositor_choose_mode(struct clv_output *output,
-				struct clv_head_config *head_cfg)
+				struct clv_head_config *head_cfg,
+				enum timing_select_method method)
 {
 	u32 max_width, max_height;
-	struct clv_mode *mode;
+	struct clv_mode *mode, *m, *mm;
 	s32 f = 0;
 	struct clv_output_config *output_cfg = &head_cfg->encoder.output;
+	u32 refresh = 0;
 
 	max_width = MAX(head_cfg->max_w, output_cfg->max_w);
 	max_height = MAX(head_cfg->max_h, output_cfg->max_h);
@@ -438,8 +457,24 @@ void clv_compositor_choose_mode(struct clv_output *output,
 			break;
 		}
 	}
+
 	if (f) {
 		if (mode->w <= max_width && mode->h <= max_height) {
+			if (method == USE_HIGHVFREQ) {
+				mm = NULL;
+				list_for_each_entry(m, &output->modes, link) {
+					if (m->refresh > refresh) {
+						refresh = m->refresh;
+						mm = m;
+					}
+				}
+				if (mm) {
+					output->current_mode = mm;
+					cmp_debug("Use preferred mode %ux%u@%u",
+				  		  m->w, m->h, m->refresh);
+					return;
+				}
+			}
 			output->current_mode = mode;
 			cmp_debug("Use preferred mode %ux%u",
 				  output->current_mode->w,

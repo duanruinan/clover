@@ -46,6 +46,8 @@ struct clv_server server;
 
 static u8 common_dbg = 0;
 
+enum timing_select_method timing_choose_mode;
+
 static void set_common_dbg(u32 flags)
 {
 	common_dbg = flags & 0x0F;
@@ -81,6 +83,7 @@ void usage(void)
 {
 	printf("clover_server [options]\n");
 	printf("\toptions:\n");
+	printf("\t\t-h, --highvfreq\n");
 	printf("\t\t-d, --daemon\n");
 	printf("\t\t\tRun server as daemon\n");
 	printf("\t\t-n, --drm-node=/dev/cardX\n");
@@ -88,9 +91,10 @@ void usage(void)
 	printf("\t\t-c, --config=config.xml\n");
 }
 
-char server_short_options[] = "dn:c:";
+char server_short_options[] = "hdn:c:";
 
 struct option server_options[] = {
+	{"highvfreq", 0, NULL, 'h'},
 	{"daemon", 0, NULL, 'd'},
 	{"drm-node", 1, NULL, 'n'},
 	{"config", 1, NULL, 'c'},
@@ -180,7 +184,8 @@ static void head_state_changed_cb(struct clv_listener *listener, void *data)
 		head->retrieve_modes(head);
 		if (head->connected) {
 			clv_compositor_choose_mode(output,
-						   &server.config->heads[i]);
+						   &server.config->heads[i],
+						   timing_choose_mode);
 			com_info("enable output[%d]", output->index);
 			output->enable(output,
 			  &server.config->heads[i].encoder.output.render_area);
@@ -301,7 +306,9 @@ static void update_layout(struct clv_compositor *c, struct clv_shell_info *si)
 						 "do nothing.", head->index);
 					continue;
 				}
-				clv_compositor_choose_mode_manually(output, rc);
+				clv_compositor_choose_mode_manually(
+							output, rc,
+							timing_choose_mode);
 				assert(output->current_mode);
 			}
 			com_info("enable output[%d]", output->index);
@@ -797,9 +804,13 @@ s32 main(s32 argc, char **argv)
 	server.linkid_created_ack_tx_len = n;
 	
 	server.hpd_listener.notify = head_state_changed_cb;
+	timing_choose_mode = USE_PREFERRED;
 	while ((ch = getopt_long(argc, argv, server_short_options,
 				 server_options, NULL)) != -1) {
 		switch (ch) {
+		case 'h':
+			timing_choose_mode = USE_HIGHVFREQ;
+			break;
 		case 'n':
 			strcpy(drm_node, optarg);
 			break;

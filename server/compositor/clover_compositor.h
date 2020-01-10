@@ -39,6 +39,11 @@ struct clv_head;
 struct clv_plane;
 struct clv_server;
 
+enum timing_select_method {
+	USE_PREFERRED = 0,
+	USE_HIGHVFREQ,
+};
+
 enum clv_desktop_mode {
 	CLV_DESKTOP_DUPLICATED = 0,
 	CLV_DESKTOP_EXTENDED,
@@ -455,9 +460,11 @@ void clv_display_run(struct clv_display *display);
 void clv_display_stop(struct clv_display *display);
 void clv_display_destroy(struct clv_display *display);
 void clv_compositor_choose_mode(struct clv_output *output,
-				struct clv_head_config *head_cfg);
+				struct clv_head_config *head_cfg,
+				enum timing_select_method method);
 void clv_compositor_choose_mode_manually(struct clv_output *output,
-					 struct clv_rect *rc);
+					 struct clv_rect *rc,
+					 enum timing_select_method method);
 void clv_output_schedule_repaint(struct clv_output *output, s32 cnt);
 void clv_output_schedule_repaint_reset(struct clv_output *output);
 void clv_compositor_schedule_repaint(struct clv_compositor *c);
