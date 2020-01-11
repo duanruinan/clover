@@ -401,7 +401,9 @@ void clv_compositor_choose_mode_manually(struct clv_output *output,
 			if (method == USE_HIGHVFREQ) {
 				mm = NULL;
 				list_for_each_entry(m, &output->modes, link) {
-					if (m->refresh > refresh) {
+					if ((m->w == mode->w)
+					    && (m->h == mode->h)
+					    && (m->refresh > refresh)) {
 						refresh = m->refresh;
 						mm = m;
 					}
@@ -463,7 +465,9 @@ void clv_compositor_choose_mode(struct clv_output *output,
 			if (method == USE_HIGHVFREQ) {
 				mm = NULL;
 				list_for_each_entry(m, &output->modes, link) {
-					if (m->refresh > refresh) {
+					if ((m->w == mode->w)
+					    && (m->h == mode->h)
+					    && (m->refresh > refresh)) {
 						refresh = m->refresh;
 						mm = m;
 					}
