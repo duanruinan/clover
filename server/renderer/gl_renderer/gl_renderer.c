@@ -813,7 +813,7 @@ static void gl_attach_dma_buffer(struct clv_surface *surface,
 		gs->target = GL_TEXTURE_EXTERNAL_OES;
 		surface->is_opaque = 1;
 		gs->shader = &disp->texture_shader_egl_external;
-		gs->pitch = buffer->stride;
+		gs->pitch = buffer->w;
 	} else {
 		clv_err("illegal pixel fmt %u", buffer->pixel_fmt);
 		return;
