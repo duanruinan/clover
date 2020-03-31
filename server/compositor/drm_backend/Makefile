@@ -4,7 +4,7 @@ include $(RPATH)/build/build_env
 .PHONY: clean
 
 OBJ := libclover_drm_backend.so detect_drm test_drm_backend drm_atomic_test \
-	drm_atomic_test_nv24
+	drm_atomic_test_nv24 test_attach_mode
 
 CFLAGS += -I$(RPATH)/utils
 CFLAGS += -I$(RPATH)/server/compositor
@@ -32,6 +32,7 @@ clean:
 	-@rm test_drm_backend
 	-@rm drm_atomic_test
 	-@rm drm_atomic_test_nv24
+	-@rm test_attach_mode
 
 libclover_drm_backend.so: drm_backend.o
 	$(CC) -shared -rdynamic $^ $(LDFLAGS) $(PLATFORM_LDFLAGS) \
@@ -45,7 +46,13 @@ drm_backend.o: drm_backend.c \
 detect_drm: detect_drm.o
 	$(CC) $< $(PLATFORM_LDFLAGS) -o $@
 
+test_attach_mode: test_attach_mode.o
+	$(CC) $< $(PLATFORM_LDFLAGS) -o $@
+
 detect_drm.o: detect_drm.c
+	$(CC) -c $< $(PLATFORM_CFLAGS) -o $@
+
+test_attach_mode.o: test_attach_mode.c
 	$(CC) -c $< $(PLATFORM_CFLAGS) -o $@
 
 test_drm_backend: test_drm_backend.o
