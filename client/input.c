@@ -650,6 +650,10 @@ static void event_proc(struct input_display *disp, struct input_event *evts,
 				disp->tx_buf[dst].v.pos.dy = (s16)dy;
 				dst++;
 			}
+			disp->tx_buf[dst].type = EV_SYN;
+			disp->tx_buf[dst].code = disp->buffer[src].code;
+			disp->tx_buf[dst].v.value = disp->buffer[src].value;
+			dst++;
 			break;
 		case EV_MSC:
 			break;
