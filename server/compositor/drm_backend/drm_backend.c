@@ -1499,38 +1499,10 @@ static struct drm_mode *drm_mode_create(const drmModeModeInfo *info)
 	return mode;
 }
 
-static struct drm_mode *add_low_clk_mode(void)
-{
-	drmModeModeInfo *m;
-	struct drm_mode *mode;
-
-	m = calloc(1, sizeof(*m));
-	if (!m)
-		return NULL;
-
-	m->clock = 575000;
-	m->hdisplay = 2560;
-	m->hsync_start = 2608;
-	m->hsync_end = 2672;
-	m->htotal = 2680;
-	m->hskew = 0;
-	m->vdisplay = 1440;
-	m->vsync_start = 1443;
-	m->vsync_end = 1448;
-	m->vtotal = 1490;
-	m->vscan = 0;
-	m->vrefresh = 144;
-	m->flags = 10;
-	m->type = 64;
-
-	mode = drm_mode_create(m);
-	return mode;
-}
-
 static s32 drm_output_add_modes(struct drm_output *output)
 {
 	s32 count = 0, i;
-	struct drm_mode *mode, *old_mode;
+	struct drm_mode *mode;
 	struct drm_head *head = output->head;
 	
 	assert(head);
@@ -1543,21 +1515,6 @@ static s32 drm_output_add_modes(struct drm_output *output)
 		mode = drm_mode_create(&head->connector->modes[i]);
 		if (!mode)
 			continue;
-		if (mode->mode_info.clock > 575000
-		    && mode->mode_info.hdisplay == 2560
-		    && mode->mode_info.vdisplay == 1440
-		    && (!(mode->mode_info.flags & DRM_MODE_FLAG_INTERLACE))) {
-			drm_warn("High pixel clock timing %u %ux%u",
-				mode->mode_info.clock, mode->mode_info.hdisplay,
-				mode->mode_info.vdisplay);
-			old_mode = mode;
-			mode = add_low_clk_mode();
-			if (mode) {
-				free(old_mode);
-			} else {
-				mode = old_mode;
-			}
-		}
 		list_add_tail(&mode->base.link, &output->base.modes);
 		count++;
 	}
