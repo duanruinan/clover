@@ -393,7 +393,8 @@ void clv_compositor_choose_mode_manually(struct clv_output *output,
 		m = NULL;
 		list_for_each_entry(mode, &output->modes, link) {
 			if (mode->w <= width && mode->h <= height) {
-				if (mode->refresh > refresh) {
+				if ((mode->refresh >= 110000)
+				    && (mode->refresh > refresh)) {
 					refresh = mode->refresh;
 					m = mode;
 				}
@@ -458,7 +459,8 @@ void clv_compositor_choose_mode(struct clv_output *output,
 		m = NULL;
 		list_for_each_entry(mode, &output->modes, link) {
 			if (mode->w <= max_width && mode->h <= max_height) {
-				if (mode->refresh > refresh) {
+				if ((mode->refresh >= 110000)
+				    && (mode->refresh > refresh)) {
 					refresh = mode->refresh;
 					m = mode;
 				}
