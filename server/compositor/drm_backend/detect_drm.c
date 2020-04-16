@@ -65,6 +65,7 @@ s32 main(s32 argc, char **argv)
 	s32 i, j;
 	u32 value;
 	u32 zpos;
+	u32 color_space;
 
 	fd = open("/dev/dri/card0", O_RDWR, 0644);
 	drmSetClientCap(fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1);
@@ -142,6 +143,8 @@ s32 main(s32 argc, char **argv)
 		printf("\t\tSRC_Y = %u\n", get_prop_id(fd, props, "SRC_Y"));
 		printf("\t\tSRC_W = %u\n", get_prop_id(fd, props, "SRC_W"));
 		printf("\t\tSRC_H = %u\n", get_prop_id(fd, props, "SRC_H"));
+		get_prop_value(fd, props, "COLOR_SPACE", &color_space);
+		printf("\t\tCOLOR_SPACE = %d\n", color_space);
 		get_prop_value(fd, props, "ZPOS", &zpos);
 		printf("\t\tZPOS = %d\n", zpos);
 		if (value == DRM_PLANE_TYPE_CURSOR)

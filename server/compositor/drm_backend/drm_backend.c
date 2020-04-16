@@ -28,6 +28,7 @@
 #include <libudev.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
+#include <linux/videodev2.h>
 #include <drm_fourcc.h>
 #include <drm/drm.h>
 #include <gbm.h>
@@ -248,6 +249,7 @@ struct drm_plane {
 	u32 prop_src_y;
 	u32 prop_src_w;
 	u32 prop_src_h;
+	u32 prop_color_space;
 
 	enum drm_plane_type type;
 
@@ -268,6 +270,7 @@ struct drm_head {
 	drmModeConnectorPtr connector;
 	drmModeObjectProperties *props;
 	u32 prop_crtc_id;
+	u32 prop_hdmi_quant_range;
 
 	struct list_head link;
 
@@ -1062,6 +1065,12 @@ static s32 drm_output_apply_state_atomic(struct drm_output_state *state,
 		drmModeAtomicAddProperty(req, output->head->connector_id,
 					 output->head->prop_crtc_id,
 					 output->crtc_id);
+		if (output->head->prop_hdmi_quant_range != ((u32)-1)) {
+			drmModeAtomicAddProperty(
+					req,
+					output->head->connector_id,
+					output->head->prop_hdmi_quant_range, 2);
+		}
 	} else {
 		drm_debug("[MODESET] DPMS is set to [OFF] .................\n");
 		drm_debug("[MODESET] Set output %u inactive", output->index);
@@ -1151,6 +1160,13 @@ static s32 drm_output_apply_state_atomic(struct drm_output_state *state,
 					 plane->prop_crtc_h,
 					 plane_state->crtc_h);
 		drm_debug("CRTC H %u %d", plane_state->crtc_h, ret);
+		if (plane->prop_color_space != ((u32)-1)) {
+			ret = drmModeAtomicAddProperty(req, plane->plane_id,
+						plane->prop_color_space,
+						V4L2_COLORSPACE_REC709);
+			drm_debug("COLOR SPACE %u %d", V4L2_COLORSPACE_REC709,
+					ret);
+		}
 	}
 
 	return 0;
@@ -2406,6 +2422,8 @@ static struct drm_plane *drm_plane_create(struct clv_compositor *c, u32 index,
 	plane->prop_src_y = get_prop_id(b->fd, plane->props, "SRC_Y");
 	plane->prop_src_w = get_prop_id(b->fd, plane->props, "SRC_W");
 	plane->prop_src_h = get_prop_id(b->fd, plane->props, "SRC_H");
+	plane->prop_color_space = get_prop_id(b->fd, plane->props,
+						"COLOR_SPACE");
 
 	get_prop_value(b->fd, plane->props, "TYPE", &type);
 	plane->type = (enum drm_plane_type)type;
@@ -2573,6 +2591,9 @@ static struct drm_head *drm_head_create(struct clv_compositor *c, u32 index,
 	}
 
 	head->prop_crtc_id = get_prop_id(b->fd, head->props, "CRTC_ID");
+	head->prop_color_space = get_prop_id(b->fd, head->props, "COLOR_SPACE");
+	head->prop_hdmi_quant_range = get_prop_id(b->fd, head->props,
+						  "hdmi_quant_range");
 
 	head->hpd_detect_source = clv_event_loop_add_timer(loop,
 							   hpd_detect_proc,
