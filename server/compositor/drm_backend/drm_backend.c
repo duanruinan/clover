@@ -610,11 +610,11 @@ static void drm_fb_unref(struct drm_fb *fb)
 		return;
 	}
 	drm_debug("[FB] unref- %p", fb);
-	drm_debug("[FB] unref result %u", fb->refcnt - 1);
+	drm_debug("[FB] unref result %d", fb->refcnt - 1);
 
 	//assert(fb->refcnt > 0);
 	if (fb->refcnt <= 0) {
-		clv_err("fb->refcnt <= 0 %d", fb->refcnt);
+		clv_err("fb->refcnt <= 0 %d %p", fb->refcnt, fb);
 		getchar();
 	}
 	if (--fb->refcnt > 0)
@@ -647,6 +647,7 @@ static void drm_dmabuf_destroy(struct clv_output *out, void *buffer)
 	struct drm_output *output;
 	struct drm_output_state *state;
 	struct drm_plane_state *ps, *next;
+	struct drm_backend *b;
 
 	drm_debug("destroy dmabuf %p", buffer);
 	if (!fb) {
@@ -655,26 +656,29 @@ static void drm_dmabuf_destroy(struct clv_output *out, void *buffer)
 	}
 	//fb->refcnt = 1;
 
-	output = container_of(out, struct drm_output, base);
-
-	if (output->state_last) {
-		ps_debug("last plane state: output (%p)", output);
-		state = output->state_last;
-		list_for_each_entry_safe(ps, next, &state->plane_states, link) {
-			drm_debug("ps->fb = %p, ps->plane->type = %u",
-				  ps->fb, ps->plane->type);
+	b = to_drm_backend(out->c);
+	list_for_each_entry(output, &b->outputs, link) {
+		if (output->state_last) {
+			ps_debug("last plane state: output (%p)", output);
+			state = output->state_last;
+			list_for_each_entry_safe(ps, next,
+						 &state->plane_states, link) {
+				drm_debug("ps->fb = %p, ps->plane->type = %u",
+					  ps->fb, ps->plane->type);
+			}
 		}
-	}
 
-	if (output->state_cur) {
-		ps_debug("current plane state: output (%p)", output);
-		state = output->state_cur;
-		list_for_each_entry_safe(ps, next, &state->plane_states, link) {
-			drm_debug("ps->fb = %p, ps->plane->type = %u",
-				  ps->fb, ps->plane->type);
-			if (ps->fb == buffer) {
-				ps->plane->state_cur = NULL;
-				drm_plane_state_free(ps, 1);
+		if (output->state_cur) {
+			ps_debug("current plane state: output (%p)", output);
+			state = output->state_cur;
+			list_for_each_entry_safe(ps, next,
+						 &state->plane_states, link) {
+				drm_debug("ps->fb = %p, ps->plane->type = %u",
+					  ps->fb, ps->plane->type);
+				if (ps->fb == buffer) {
+					ps->plane->state_cur = NULL;
+					drm_plane_state_free(ps, 1);
+				}
 			}
 		}
 	}
@@ -2591,7 +2595,6 @@ static struct drm_head *drm_head_create(struct clv_compositor *c, u32 index,
 	}
 
 	head->prop_crtc_id = get_prop_id(b->fd, head->props, "CRTC_ID");
-	head->prop_color_space = get_prop_id(b->fd, head->props, "COLOR_SPACE");
 	head->prop_hdmi_quant_range = get_prop_id(b->fd, head->props,
 						  "hdmi_quant_range");
 
