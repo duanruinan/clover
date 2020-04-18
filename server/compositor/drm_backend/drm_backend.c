@@ -39,6 +39,10 @@
 #include <clover_region.h>
 #include <clover_compositor.h>
 
+#ifndef CONFIG_ROCKCHIP_DRM_HWC
+#define CONFIG_ROCKCHIP_DRM_HWC
+#endif
+
 static u8 drm_dbg = 5;
 static u8 gbm_dbg = 5;
 static u8 timer_dbg = 5;
@@ -315,6 +319,13 @@ struct drm_output {
 	/* The previously-submitted state, where the hardware has not
 	 * yet acknowledged completion of state_cur. */
 	struct drm_output_state *state_last;
+
+#ifdef CONFIG_ROCKCHIP_DRM_HWC
+	/*
+	 * for cursor which has hot_x/hot_y.
+	 */
+	s32 cursor_relocate;
+#endif
 };
 
 struct drm_backend {
@@ -1846,6 +1857,49 @@ static void cursor_update(struct drm_backend *b, struct clv_view *v)
 	}
 }
 
+#ifdef CONFIG_ROCKCHIP_DRM_HWC
+static void cursor_relocate(struct drm_output *output, struct clv_view *v,
+			    s32 x, s32 y, u32 width, u32 height)
+{
+	struct gbm_bo *bo;
+	struct clv_buffer *buffer = v->cursor_buf;
+	struct shm_buffer *shm_buf = container_of(buffer, struct shm_buffer,
+						  base);
+	u32 buf[buffer->w * buffer->h];
+	u32 cp_w, cp_h, skip_x, skip_y;
+	s32 i;
+
+	bo = output->cursor_fb[output->cursor_index]->bo;
+
+	if (x > 0) {
+		skip_x = 0;
+		cp_w = width;
+	} else {
+		skip_x = -x;
+		cp_w = width + x;
+	}
+
+	if (y > 0) {
+		skip_y = 0;
+		cp_h = height;
+	} else {
+		skip_y = -y;
+		cp_h = height + y;
+	}
+
+	memset(buf, 0, buffer->w * buffer->h * 4);
+	for (i = 0; i < cp_h; i++) {
+		memcpy(buf + i * buffer->w,
+		       shm_buf->shm.map + (i + skip_y) * buffer->stride
+		       		+ skip_x * 4,
+		       cp_w * 4);
+	}
+
+	if (gbm_bo_write(bo, buf, sizeof(buf)) < 0)
+		gbm_err("write cursor bo failed. %s", strerror(errno));
+}
+#endif
+
 static struct drm_plane_state * drm_output_prepare_cursor_view(
 					struct drm_output_state *output_state,
 					struct clv_view *v)
@@ -1981,6 +2035,24 @@ static struct drm_plane_state * drm_output_prepare_cursor_view(
 	state->crtc_y = y;
 	state->crtc_w = width;
 	state->crtc_h = height;
+
+#ifdef CONFIG_ROCKCHIP_DRM_HWC
+	if (x < 0 || y < 0) {
+		if (state->output) {
+			if (x < 0)
+				state->crtc_x = 0;
+			if (y < 0)
+				state->crtc_y = 0;
+			state->output->cursor_relocate = 1;
+			cursor_relocate(output, v, x, y, width, height);
+		}
+	} else {
+		if (state->output && state->output->cursor_relocate) {
+			state->output->cursor_relocate = 0;
+			cursor_relocate(output, v, x, y, width, height);
+		}
+	}
+#endif
 
 	drm_debug("output %d's cursor pos: %d,%d %ux%u", output->index,
 		  state->crtc_x, state->crtc_y, state->crtc_w, state->crtc_h);

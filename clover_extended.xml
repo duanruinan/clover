@@ -43,12 +43,16 @@
 		<!--
 			output's index indicate the physical LCDC/CRTC
 		-->
-		<output index="1" max_width="2560" max_height="1600" count_layers="2" def_rect="1920,0/1920x1080">
-			<hw_layer index="5" type="cursor" count_formats="2">
+		<output index="1" max_width="2560" max_height="1600" count_layers="3" def_rect="1920,0/1920x1080">
+			<hw_layer index="3" type="primary" count_formats="2">
 				<format>XRGB8888</format>
 				<format>ARGB8888</format>
 			</hw_layer>
-			<hw_layer index="4" type="primary" count_formats="3">
+			<hw_layer index="4" type="cursor" count_formats="2">
+				<format>XRGB8888</format>
+				<format>ARGB8888</format>
+			</hw_layer>
+			<hw_layer index="5" type="overlay" count_formats="3">
 				<format>XRGB8888</format>
 				<format>ARGB8888</format>
 				<format>NV12</format>
