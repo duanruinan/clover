@@ -1865,9 +1865,29 @@ static void cursor_relocate(struct drm_output *output, struct clv_view *v,
 	struct clv_buffer *buffer = v->cursor_buf;
 	struct shm_buffer *shm_buf = container_of(buffer, struct shm_buffer,
 						  base);
-	u32 buf[buffer->w * buffer->h];
 	u32 cp_w, cp_h, skip_x, skip_y;
 	s32 i;
+	u32 buf[64*64];
+
+	if (width > 64) {
+		drm_err("width illegal %u", width);
+		return;
+	}
+
+	if (height > 64) {
+		drm_err("height illegal %u", height);
+		return;
+	}
+
+	if (buffer->w == 0 || buffer->w > 64) {
+		drm_err("buffer width illegal %u", buffer->w);
+		return;
+	}
+
+	if (buffer->h == 0 || buffer->h > 64) {
+		drm_err("buffer height illegal %u", buffer->h);
+		return;
+	}
 
 	bo = output->cursor_fb[output->cursor_index]->bo;
 
@@ -1876,6 +1896,10 @@ static void cursor_relocate(struct drm_output *output, struct clv_view *v,
 		cp_w = width;
 	} else {
 		skip_x = -x;
+		if (x < -63) {
+			drm_warn("x = %d", x);
+			return;
+		}
 		cp_w = width + x;
 	}
 
@@ -1884,10 +1908,15 @@ static void cursor_relocate(struct drm_output *output, struct clv_view *v,
 		cp_h = height;
 	} else {
 		skip_y = -y;
+		if (y < -63) {
+			drm_warn("y = %d", y);
+			return;
+		}
 		cp_h = height + y;
 	}
 
-	memset(buf, 0, buffer->w * buffer->h * 4);
+	memset(buf, 0, 64 * 64 * 4);
+	
 	for (i = 0; i < cp_h; i++) {
 		memcpy(buf + i * buffer->w,
 		       shm_buf->shm.map + (i + skip_y) * buffer->stride
@@ -1895,7 +1924,7 @@ static void cursor_relocate(struct drm_output *output, struct clv_view *v,
 		       cp_w * 4);
 	}
 
-	if (gbm_bo_write(bo, buf, sizeof(buf)) < 0)
+	if (gbm_bo_write(bo, buf, 64*64*4) < 0)
 		gbm_err("write cursor bo failed. %s", strerror(errno));
 }
 #endif
@@ -2022,6 +2051,25 @@ static struct drm_plane_state * drm_output_prepare_cursor_view(
 	drm_debug("width = %u height = %u", width, height);
 
 	state->v = v;
+
+#ifdef CONFIG_ROCKCHIP_DRM_HWC
+	if (x < 0 || y < 0) {
+		if (state->output) {
+			state->output->cursor_relocate = 1;
+			drm_debug("x %d, y %d, need_update %d", x, y,
+				  need_update);
+			cursor_relocate(output, v, x, y, width, height);
+		}
+	} else {
+		if (state->output && state->output->cursor_relocate) {
+			drm_debug("x %d, y %d, need_update %d", x, y,
+				  need_update);
+			state->output->cursor_relocate = 0;
+			cursor_relocate(output, v, x, y, width, height);
+		}
+	}
+#endif
+
 	state->fb = drm_fb_ref(output->cursor_fb[output->cursor_index]);
 	//printf("Use Cursor bo %d, fb %u\n", output->cursor_index,
 	//	state->fb->fb_id);
@@ -2033,26 +2081,16 @@ static struct drm_plane_state * drm_output_prepare_cursor_view(
 
 	state->crtc_x = x;
 	state->crtc_y = y;
-	state->crtc_w = width;
-	state->crtc_h = height;
-
 #ifdef CONFIG_ROCKCHIP_DRM_HWC
-	if (x < 0 || y < 0) {
-		if (state->output) {
-			if (x < 0)
-				state->crtc_x = 0;
-			if (y < 0)
-				state->crtc_y = 0;
-			state->output->cursor_relocate = 1;
-			cursor_relocate(output, v, x, y, width, height);
-		}
-	} else {
-		if (state->output && state->output->cursor_relocate) {
-			state->output->cursor_relocate = 0;
-			cursor_relocate(output, v, x, y, width, height);
-		}
+	if (x < 0) {
+		state->crtc_x = 0;
+	}
+	if (y < 0) {
+		state->crtc_y = 0;
 	}
 #endif
+	state->crtc_w = width;
+	state->crtc_h = height;
 
 	drm_debug("output %d's cursor pos: %d,%d %ux%u", output->index,
 		  state->crtc_x, state->crtc_y, state->crtc_w, state->crtc_h);
@@ -2072,7 +2110,7 @@ static struct drm_plane_state * drm_output_prepare_overlay_view(
 
 	ps_debug("prepare overylay view's state");
 	if (!v->curr_dmafb) {
-		ps_warn("view %p's curr_dmafb == %p", v, v->curr_dmafb);
+		/* may be a empty view not assigned with any buffer */
 		return NULL;
 	}
 
