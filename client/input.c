@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
+#include <stdbool.h>
 #include <sys/socket.h>
 #include <linux/kd.h>
 #include <dirent.h>
