@@ -28,7 +28,10 @@
 #define CURSOR_ACCEL_THRESHOLD_C 40
 #define CURSOR_ACCEL_THRESHOLD_D 50
 
-static s32 has_kbd = 0;
+/*
+ * multi-kbd support
+ * static s32 has_kbd = 0;
+ */
 
 enum input_type {
 	INPUT_TYPE_UNKNOWN = 0,
@@ -144,6 +147,36 @@ struct input_display {
 
 	s32 run;
 };
+
+/*
+ * update kbd sysfs device path
+ * search around the whole device list, search for TYPE==INPUT_TYPE_KBD.
+ * If there is still a keyboard, update the file path, otherwise remove
+ * the file /tmp/kbd_name.
+ */
+static void update_kbd_name(struct input_display *disp)
+{
+	struct input_device *dev;
+	bool kbd_empty = true;
+	char cmd[64];
+
+	list_for_each_entry(dev, &disp->devs, link) {
+		if (dev->type == INPUT_TYPE_KBD) {
+			kbd_empty = false;
+			break;
+		}
+	}
+
+	if (kbd_empty) {
+		system("rm -f /tmp/kbd_name");
+		clv_debug("no kbd left.\n");
+	} else {
+		memset(cmd, 0, 64);
+		sprintf(cmd, "echo %s > /tmp/kbd_name", dev->name);
+		system(cmd);
+		clv_debug("update kbd_name as %s", dev->name);
+	}
+}
 
 static void input_device_destroy(struct input_device *dev)
 {
@@ -406,10 +439,14 @@ static void remove_input_device(struct input_display *disp, const char *devpath)
 			clv_debug("Remove %s, type %s", devpath,
 				dev_present->type == INPUT_TYPE_MOUSE?"M":"K");
 			if (dev_present->type == INPUT_TYPE_KBD) {
-				system("rm -f /tmp/kbd_name");
-				has_kbd = 0;
+				/*
+				 * multi-kbd support
+				 * system("rm -f /tmp/kbd_name");
+				 * has_kbd = 0;
+				 */
 			}
 			input_device_destroy(dev_present);
+			update_kbd_name(disp);
 			return;
 		}
 	}
@@ -728,9 +765,12 @@ static void add_input_device(struct input_display *disp, const char *devpath)
 	type = test_dev(devpath);
 	if (type == INPUT_TYPE_UNKNOWN)
 		return;
-	if (type == INPUT_TYPE_KBD && has_kbd) {
-			return;
-	}
+	/*
+	 * multi-kbd support
+	 * 
+	 * if (type == INPUT_TYPE_KBD && has_kbd)
+	 *	return;
+	 */
 
 	fd = open(devpath, O_RDWR | O_CLOEXEC, 0644);
 	if (fd < 0) {
@@ -764,7 +804,10 @@ static void add_input_device(struct input_display *disp, const char *devpath)
 		memset(cmd, 0, 64);
 		sprintf(cmd, "echo %s > /tmp/kbd_name", devpath);
 		system(cmd);
-		has_kbd = 1;
+		/*
+		 * multi-kbd support
+		 * has_kbd = 1;
+		 */
 	}
 }
 
