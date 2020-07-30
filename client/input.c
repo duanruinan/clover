@@ -758,7 +758,7 @@ static s32 read_input_event(s32 fd, u32 mask, void *data)
 
 static void add_input_device(struct input_display *disp, const char *devpath)
 {
-	struct input_device *dev;
+	struct input_device *dev, *b;
 	enum input_type type;
 	s32 fd;
 	char cmd[64];
@@ -777,6 +777,14 @@ static void add_input_device(struct input_display *disp, const char *devpath)
 	if (fd < 0) {
 		clv_err("cannot open %s, %s", devpath, strerror(errno));
 		return;
+	}
+
+	list_for_each_entry(b, &disp->devs, link) {
+		if (!strcmp(b->name, devpath)) {
+			clv_err("already add device %s, skip it.", devpath);
+			close(fd);
+			return;
+		}
 	}
 
 	dev = calloc(1, sizeof(*dev));
