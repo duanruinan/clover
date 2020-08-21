@@ -601,6 +601,7 @@ static void normalize_mouse_pos(s32 cur_screen,
 		disp->screen_x += dx;
 		disp->screen_y += dy;
 	}
+	index = check_mouse_pos(disp, disp->screen_x, disp->screen_y);
 	gen_global_pos(disp, index);
 }
 
