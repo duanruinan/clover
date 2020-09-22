@@ -2396,6 +2396,7 @@ static s32 drm_output_disable(struct clv_output *base)
 		INIT_LIST_HEAD(&l->link);
 	}
 #endif
+	output->base.current_mode = NULL;
 	base->enabled = 0;
 	drm_debug("CRTC %u is disabled.", output->crtc_id);
 	return 0;
